@@ -6,7 +6,8 @@ import {
   filterVerticalHeaders, filterSideNotes, SIDE_NOTE_PATTERNS,
   normalizePdfjsItem, extractAnchors, buildBandsFromAnchors,
   collectBandItems, classifyXBand, emitRowFromBand,
-  stripIconText, ICON_STRINGS
+  stripIconText, ICON_STRINGS,
+  mergeMultiCodeRows
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -522,6 +523,98 @@ test('emitRowFromBand: cabla M4 — descrizione finale non contiene "AUTO" resid
   assert.match(row.descrizione, /^MEC 200A TRUCK$/);
   assert.equal(row.prezzo, 10500);
   assert.equal(row.review_flag, '');
+});
+
+// === M5 — multi-code merge ===
+
+test('mergeMultiCodeRows: caso classico §P5 — prev desc+prezzo, next vuoto, dy<35 → merge', () => {
+  // Pag 36 PDF Cormach: 20100202 (y=222) e 20100326 (y=250 dopo aggregazione
+  // di banda) condividono "Protezioni torretta" e prezzo 150.
+  const rows = [
+    { codice: '20100202', descrizione: 'Protezioni torretta. Set di 15 pezzi', prezzo: 150,  pagina: '36', review_flag: '',                  yAnchor: 222 },
+    { codice: '20100326', descrizione: '',                                       prezzo: null, pagina: '36', review_flag: 'PREZZO_MANCANTE',   yAnchor: 250 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].review_flag, '');                              // primo invariato
+  assert.equal(out[1].descrizione, 'Protezioni torretta. Set di 15 pezzi');
+  assert.equal(out[1].prezzo, 150);
+  assert.equal(out[1].review_flag, 'MERGED_FROM_PREV');
+});
+
+test('mergeMultiCodeRows: NON merge se r_{i+1} ha descrizione propria (caso pag 54)', () => {
+  // 20100112 e 20100362: stessa descrizione "Kit radiocomando" ma prezzi diversi
+  // (3.100 / 5.800). Entrambi hanno descrizione + prezzo. dy<35 ma il check
+  // next.descrizione non-vuota blocca il merge → due righe distinte invariate.
+  const rows = [
+    { codice: '20100112', descrizione: 'Kit radiocomando', prezzo: 3100, pagina: '54', review_flag: '', yAnchor: 953 },
+    { codice: '20100362', descrizione: 'Kit radiocomando', prezzo: 5800, pagina: '54', review_flag: '', yAnchor: 980 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].descrizione, 'Kit radiocomando');
+  assert.equal(out[0].prezzo, 3100);
+  assert.equal(out[1].descrizione, 'Kit radiocomando');
+  assert.equal(out[1].prezzo, 5800);
+  assert.equal(out[1].review_flag, '');                              // NON 'MERGED_FROM_PREV'
+});
+
+test('mergeMultiCodeRows: NON merge se r_{i+1} ha prezzo proprio', () => {
+  const rows = [
+    { codice: 'A', descrizione: 'Desc A', prezzo: 100, pagina: '1', review_flag: '', yAnchor: 200 },
+    { codice: 'B', descrizione: '',       prezzo: 200, pagina: '1', review_flag: '', yAnchor: 220 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[1].descrizione, '');
+  assert.equal(out[1].prezzo, 200);
+  assert.equal(out[1].review_flag, '');
+});
+
+test('mergeMultiCodeRows: NON merge se r_i non ha prezzo', () => {
+  const rows = [
+    { codice: 'A', descrizione: 'Desc A', prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE', yAnchor: 200 },
+    { codice: 'B', descrizione: '',       prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE', yAnchor: 220 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[1].descrizione, '');
+  assert.equal(out[1].review_flag, 'PREZZO_MANCANTE');
+});
+
+test('mergeMultiCodeRows: NON merge se r_i non ha descrizione', () => {
+  const rows = [
+    { codice: 'A', descrizione: '', prezzo: 100,  pagina: '1', review_flag: '', yAnchor: 200 },
+    { codice: 'B', descrizione: '', prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE', yAnchor: 220 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[1].descrizione, '');
+  assert.equal(out[1].review_flag, 'PREZZO_MANCANTE');
+});
+
+test('mergeMultiCodeRows: NON merge se |dy| >= 35 (righe troppo distanti)', () => {
+  const rows = [
+    { codice: 'A', descrizione: 'Desc A', prezzo: 100,  pagina: '1', review_flag: '',                  yAnchor: 200 },
+    { codice: 'B', descrizione: '',       prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE',   yAnchor: 240 }  // dy=40
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[1].descrizione, '');
+  assert.equal(out[1].review_flag, 'PREZZO_MANCANTE');
+});
+
+test('mergeMultiCodeRows: input vuoto/non-array → []', () => {
+  assert.deepEqual(mergeMultiCodeRows([]), []);
+  assert.deepEqual(mergeMultiCodeRows(null), []);
+  assert.deepEqual(mergeMultiCodeRows(undefined), []);
+});
+
+test('mergeMultiCodeRows: non muta l\'input originale', () => {
+  const rows = [
+    { codice: 'A', descrizione: 'Desc A', prezzo: 100,  pagina: '1', review_flag: '',                  yAnchor: 200 },
+    { codice: 'B', descrizione: '',       prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE',   yAnchor: 220 }
+  ];
+  const snapshot = JSON.stringify(rows);
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(JSON.stringify(rows), snapshot);                       // input invariato
+  assert.equal(out[1].review_flag, 'MERGED_FROM_PREV');               // copia modificata
 });
 
 test('emitRowFromBand: scarta item nelle fasce compatibilita/noteLaterali', () => {

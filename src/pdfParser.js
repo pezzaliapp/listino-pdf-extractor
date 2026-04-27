@@ -550,6 +550,53 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
   };
 }
 
+/**
+ * M5 — Merge multi-codice (intra-page).
+ *
+ * Quando due codici diversi condividono una cella tabella verticalmente unita
+ * (P5 SPEC v5), la riga del secondo codice esce vuota perché descrizione e
+ * prezzo cadono entrambi nella banda del primo. Questo helper detecta la
+ * coppia consecutiva e copia descrizione+prezzo da r_i a r_{i+1}, marcando
+ * con `'MERGED_FROM_PREV'`.
+ *
+ * Condizioni AND per il merge:
+ *   - r_i.descrizione non-vuota AND r_i.prezzo non-null
+ *   - r_{i+1}.descrizione vuota AND r_{i+1}.prezzo null
+ *   - |r_{i+1}.yAnchor - r_i.yAnchor| < 35
+ *
+ * Falso positivo da NON mergare (caso pag 54 PDF Cormach): 20100112 e
+ * 20100362 hanno entrambi descrizione "Kit radiocomando" e prezzi diversi
+ * (3.100 / 5.800) → next.descrizione non-vuota → no merge.
+ *
+ * Le righe in input devono essere già ordinate per yAnchor crescente sulla
+ * stessa pagina (è il caso naturale di output di buildBandsFromAnchors).
+ *
+ * NOTA: il merge è iterativo, quindi cascade A→B→C si propaga (B prende
+ * da A, poi C prende da B). Sul listino Cormach reale non sono attesi
+ * cascade (i pattern P5 sono sempre coppie), ma il comportamento non è
+ * esplicitamente verificato. Se in futuro un listino producesse cascade
+ * indesiderati, l'opzione è limitare l'iterazione a un singolo passaggio.
+ */
+export function mergeMultiCodeRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  const out = rows.map(r => ({ ...r }));
+  for (let i = 0; i < out.length - 1; i++) {
+    const prev = out[i];
+    const next = out[i + 1];
+    if (!prev || !next) continue;
+    const dy = Math.abs(Number(next.yAnchor) - Number(prev.yAnchor));
+    if (!Number.isFinite(dy) || dy >= 35) continue;
+    if (!prev.descrizione || String(prev.descrizione).length === 0) continue;
+    if (prev.prezzo === null || prev.prezzo === undefined) continue;
+    if (next.descrizione && String(next.descrizione).length > 0) continue;
+    if (next.prezzo !== null && next.prezzo !== undefined) continue;
+    next.descrizione = prev.descrizione;
+    next.prezzo = prev.prezzo;
+    next.review_flag = 'MERGED_FROM_PREV';
+  }
+  return out;
+}
+
 /** Estrae righe-prodotto da un PDFDocumentProxy di pdfjs-dist (anchor-first, v5). */
 export async function extractFromPdfDocument(pdf, onLog = () => {}) {
   const pages_total = pdf.numPages;
@@ -601,10 +648,18 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     }
 
     const bands = buildBandsFromAnchors(anchors, 0, pageHeight);
+    const pageRows = [];
     for (const band of bands) {
       const bandItems = collectBandItems(items, band);
       const row = emitRowFromBand(band.anchor, bandItems, cols, pageNum);
-      if (row) allRows.push(row);
+      if (row) pageRows.push({ ...row, yAnchor: band.anchor.top });
+    }
+
+    // M5 — merge multi-codice intra-page
+    const mergedPageRows = mergeMultiCodeRows(pageRows);
+    for (const r of mergedPageRows) {
+      const { yAnchor: _y, ...clean } = r;
+      allRows.push(clean);
     }
   }
 
