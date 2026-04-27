@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePriceString, isProductCode, hasProductCode, isCompleteProductRow, computeYBucket, computeColumnBands } from '../src/pdfParser.js';
+import { parsePriceString, isProductCode, hasProductCode, isCompleteProductRow, computeYBucket, computeColumnBands, filterVerticalHeaders } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
   assert.equal(parsePriceString('3.940,00'), 3940);
@@ -83,6 +83,59 @@ test('computeColumnBands: prezzi con simbolo € e arrotondamento posizioni', ()
   const bands = computeColumnBands(items, 600);
   assert.equal(bands._anchors.xPriceLeft, 480);
   assert.equal(bands._anchors.xPriceRight, 510);
+});
+
+test('filterVerticalHeaders: rimuove caratteri singoli sopra il primo anchor', () => {
+  // firstAnchorTop=200 (display-top: piccolo = alto). I 3 char a top=100,110,120
+  // sono SOPRA il primo anchor e brevi → header verticale, da rimuovere.
+  const items = [
+    { str: 'T', x0: 380, x1: 388, top: 100 },
+    { str: 'O', x0: 380, x1: 388, top: 110 },
+    { str: 'U', x0: 380, x1: 388, top: 120 },
+    { str: '21100070', x0: 100, x1: 140, top: 215 },
+    { str: 'Cono per cappellotto', x0: 165, x1: 280, top: 215 }
+  ];
+  const out = filterVerticalHeaders(items, 200);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].str, '21100070');
+  assert.equal(out[1].str, 'Cono per cappellotto');
+});
+
+test('filterVerticalHeaders: tiene caratteri brevi se sotto il primo anchor', () => {
+  // 'S' a top=220 è sotto al primo anchor (200) → non è header verticale
+  const items = [
+    { str: 'S', x0: 380, x1: 386, top: 220 },
+    { str: '21100070', x0: 100, x1: 140, top: 215 }
+  ];
+  const out = filterVerticalHeaders(items, 200);
+  assert.equal(out.length, 2);
+});
+
+test('filterVerticalHeaders: tiene token con length >= 3', () => {
+  const items = [
+    { str: 'TOUCH', x0: 380, x1: 415, top: 100 },
+    { str: '21100070', x0: 100, x1: 140, top: 215 }
+  ];
+  const out = filterVerticalHeaders(items, 200);
+  assert.equal(out.length, 2);
+});
+
+test('filterVerticalHeaders: tiene se larghezza >= 12pt (lettera larga / parola)', () => {
+  const items = [
+    { str: 'T', x0: 380, x1: 395, top: 100 }, // width=15 → non singola stretta
+    { str: '21100070', x0: 100, x1: 140, top: 215 }
+  ];
+  const out = filterVerticalHeaders(items, 200);
+  assert.equal(out.length, 2);
+});
+
+test('filterVerticalHeaders: senza primo anchor, ritorna items invariati', () => {
+  const items = [
+    { str: 'T', x0: 380, x1: 388, top: 100 },
+    { str: 'O', x0: 380, x1: 388, top: 110 }
+  ];
+  assert.equal(filterVerticalHeaders(items, undefined).length, 2);
+  assert.equal(filterVerticalHeaders(items, NaN).length, 2);
 });
 
 test('hasProductCode vs isCompleteProductRow', () => {

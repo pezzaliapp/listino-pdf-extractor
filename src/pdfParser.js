@@ -207,6 +207,32 @@ function _modeOfRounded(values) {
 }
 
 /**
+ * M3 — Filtro header verticale (rotated header).
+ * Identifica i text item che sono caratteri 1-2 di intestazioni di colonna
+ * ruotate 90° (es. "TOUCH MEC 2000S" sparpagliato come singole lettere
+ * sopra la prima riga di dati). Criteri (pseudocodifica SPEC §M3):
+ *   - top < firstAnchorTop - 5     (sopra il primo codice della pagina,
+ *                                   in coord display-top: piccolo = alto)
+ *   - str.length <= 2
+ *   - (x1 - x0) < 12pt
+ * Ritorna la lista degli item NON marcati come header verticale.
+ * Se firstAnchorTop non è fornito, ritorna gli item invariati.
+ */
+export function filterVerticalHeaders(items, firstAnchorTop) {
+  if (!Array.isArray(items)) return [];
+  if (typeof firstAnchorTop !== 'number' || !Number.isFinite(firstAnchorTop)) return items;
+  return items.filter(it => {
+    if (!it) return false;
+    const t = String(it.str || '');
+    const w = (Number(it.x1) || 0) - (Number(it.x0) || 0);
+    const top = Number(it.top);
+    if (!Number.isFinite(top)) return true;
+    const isHeader = top < firstAnchorTop - 5 && t.length <= 2 && w < 12;
+    return !isHeader;
+  });
+}
+
+/**
  * M8 — bucket Y proporzionale al font dominante.
  * Filtra i font del corpo (6-12pt, esclude header e icone), prende la moda
  * arrotondata e ritorna moda*0.4. Cade su `fallback` (2pt) se non trova
