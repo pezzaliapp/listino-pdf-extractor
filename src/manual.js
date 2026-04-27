@@ -40,6 +40,7 @@ export const MANUAL_HTML = `
         <ul>
           <li><strong><code>00_Info</code></strong>: metadati di estrazione (file di origine, pagine, righe estratte, righe in CHECK, versione app).</li>
           <li><strong><code>Listino</code></strong>: una riga per articolo, 6 colonne — <code>Codice</code>, <code>Descrizione</code>, <code>Prezzo_EUR</code>, <code>Pagina</code>, <code>Review_Flag</code>, <code>Sezione</code> (titolo della pagina del PDF e, se presente, il sotto-marker tipo <em>"ACCESSORI STANDARD"</em>).</li>
+          <li><strong><code>Accessori_Standard</code></strong>: stessa struttura di <code>Listino</code>, ma raccoglie solo le righe con prezzo vuoto la cui sezione contiene <em>"ACCESSORI STANDARD"</em>, <em>"OPTIONAL"</em> o <em>"OPTIONAL CONSIGLIATI"</em> (codici di accessori inclusi in dotazione, senza listino in quella posizione). Il foglio è sempre presente, anche vuoto.</li>
         </ul>
       </section>
 
@@ -81,7 +82,7 @@ export const MANUAL_HTML = `
 
       <section id="m-8">
         <h2>8. Versione</h2>
-        <p>v4.0.0 — Autore: pezzaliapp.</p>
+        <p>v5.0.0 — Autore: pezzaliapp.</p>
       </section>
     </div>
   </div>

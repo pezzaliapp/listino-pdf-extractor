@@ -1,6 +1,6 @@
 {
   "name": "listino-pdf-extractor",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "PWA per estrarre da un PDF di listino codice, descrizione, prezzo e pagina in un Excel pulito",
   "type": "module",
   "scripts": {
