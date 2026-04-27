@@ -2,7 +2,7 @@
 
 import { get, set } from 'idb-keyval';
 
-export const DISCLAIMER_VERSION = 2;
+export const DISCLAIMER_VERSION = 3;
 const STORAGE_KEY = `disclaimer_accepted_v${DISCLAIMER_VERSION}`;
 
 const DISCLAIMER_HTML = `
@@ -15,7 +15,9 @@ const DISCLAIMER_HTML = `
     <li><strong>L'app non sostituisce il listino ufficiale.</strong> In caso di discrepanza fa fede esclusivamente il documento PDF originale del produttore.</li>
     <li><strong>Lo sviluppatore non è responsabile</strong> per perdite economiche, danni diretti o indiretti, errori di preventivazione, contestazioni con clienti o fornitori, sanzioni o qualsiasi altra conseguenza derivante dall'uso dei dati estratti.</li>
     <li><strong>Il PDF caricato non lascia il dispositivo:</strong> l'elaborazione avviene interamente nel browser.</li>
-    <li><strong>Titolarità.</strong> Listino PDF Extractor è un progetto open-source di pezzaliapp. I marchi e i nomi commerciali eventualmente presenti nei PDF caricati dall'utente appartengono ai rispettivi proprietari e non sono in alcun modo affiliati o sponsorizzati dall'autore dell'app.</li>
+    <li><strong>Titolarità.</strong> Listino PDF Extractor è un progetto open-source di <strong>pezzaliapp</strong>. I marchi e i nomi commerciali eventualmente presenti nei PDF caricati dall'utente appartengono ai rispettivi proprietari e non sono in alcun modo affiliati o sponsorizzati dall'autore dell'app.</li>
+    <li><strong>Funzionamento.</strong> L'app classifica gli articoli del PDF tramite parole-chiave generiche del settore (es. "equilibratrice", "smontagomme", "sollevatore"). Le regole sono modificabili dall'utente nel pannello Admin e vengono salvate <strong>solo nel browser locale</strong>. La correttezza della classificazione dipende dal vocabolario usato nel PDF di origine: vai sempre a verificare il foglio <code>99_Diagnostica</code> dell'Excel per le righe non classificate.</li>
+    <li><strong>Trattamento dati.</strong> Tutti i PDF caricati e tutte le regole personalizzate restano nel browser dell'utente. L'app non raccoglie analytics, telemetria o identificativi.</li>
   </ol>
   <h3>Procedendo dichiari di:</h3>
   <ul>

@@ -6,7 +6,7 @@
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0b3d91" />
-    <meta name="description" content="Estrae listini Cormach (e simili) da PDF in Excel multi-foglio." />
+    <meta name="description" content="Estrae listini PDF in Excel multi-foglio con classificazione automatica per parole-chiave." />
     <title>Listino PDF Extractor</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
@@ -17,9 +17,14 @@
           <span aria-hidden="true">🧾</span>
           <span>Listino PDF Extractor</span>
         </h1>
-        <button id="btn-manual" class="btn btn-ghost" type="button" aria-haspopup="dialog">
-          📖 Manuale
-        </button>
+        <div class="header-actions">
+          <button id="btn-manual" class="btn btn-ghost" type="button" aria-haspopup="dialog">
+            📖 Manuale
+          </button>
+          <button id="admin-btn" class="btn btn-ghost" type="button" aria-haspopup="dialog" aria-label="Admin">
+            ⚙️ Admin
+          </button>
+        </div>
       </header>
 
       <main class="container">
@@ -46,6 +51,7 @@
                   <th>Descrizione</th>
                   <th>Prezzo €</th>
                   <th>Pag.</th>
+                  <th>Match</th>
                   <th>Flag</th>
                 </tr>
               </thead>
@@ -67,7 +73,7 @@
       </main>
 
       <footer class="footer">
-        <span>v1.0.0</span>
+        <span>v3.0.0</span>
         <span>·</span>
         <span>© 2026</span>
         <span>·</span>
@@ -78,6 +84,7 @@
     </div>
 
     <div id="modal-root"></div>
+    <div id="admin-drawer" hidden></div>
 
     <script type="module" src="/src/main.js"></script>
   </body>
