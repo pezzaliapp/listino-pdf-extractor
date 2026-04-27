@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePriceString, isProductCode, hasProductCode, isCompleteProductRow, computeYBucket, computeColumnBands, filterVerticalHeaders, filterSideNotes, SIDE_NOTE_PATTERNS } from '../src/pdfParser.js';
+import {
+  parsePriceString, isProductCode, hasProductCode, isCompleteProductRow,
+  computeYBucket, computeColumnBands,
+  filterVerticalHeaders, filterSideNotes, SIDE_NOTE_PATTERNS,
+  normalizePdfjsItem, extractAnchors, buildBandsFromAnchors,
+  collectBandItems, classifyXBand, emitRowFromBand
+} from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
   assert.equal(parsePriceString('3.940,00'), 3940);
@@ -200,6 +206,214 @@ test('filterSideNotes: senza fascia valida ritorna items invariati', () => {
   assert.equal(filterSideNotes(items, null).length, 1);
   assert.equal(filterSideNotes(items, [NaN, 95]).length, 1);
   assert.equal(filterSideNotes(items, [0]).length, 1);
+});
+
+// === M1 — anchor-first helpers ===
+
+test('normalizePdfjsItem: estrae x0/x1/top/bottom/fontSize correttamente', () => {
+  const raw = {
+    str: 'foo',
+    transform: [9, 0, 0, 9, 100, 700],   // fontSize=9, x0=100, yBaseline=700
+    width: 30,
+    height: 9
+  };
+  const norm = normalizePdfjsItem(raw, 800);
+  assert.equal(norm.str, 'foo');
+  assert.equal(norm.x0, 100);
+  assert.equal(norm.x1, 130);
+  assert.equal(norm.fontSize, 9);
+  // pageHeight=800, top = 800-(700+9) = 91, bottom = 800-700 = 100
+  assert.equal(norm.top, 91);
+  assert.equal(norm.bottom, 100);
+});
+
+test('normalizePdfjsItem: ritorna null su input invalido', () => {
+  assert.equal(normalizePdfjsItem(null, 800), null);
+  assert.equal(normalizePdfjsItem({ str: 'foo' }, 800), null);
+  assert.equal(normalizePdfjsItem({ str: 'foo', transform: [1, 2, 3] }, 800), null);
+});
+
+test('extractAnchors: filtra solo codici a 8 cifre, ordina per top crescente', () => {
+  const items = [
+    { str: '21100070', top: 215 },
+    { str: '00100208', top: 100 },
+    { str: 'Cono',     top: 110 },
+    { str: '12345',    top: 220 }, // troppo corto
+    { str: '21100375', top: 180 },
+    { str: '123456789',top: 300 }  // 9 cifre, no
+  ];
+  const out = extractAnchors(items);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].codice, '00100208');
+  assert.equal(out[1].codice, '21100375');
+  assert.equal(out[2].codice, '21100070');
+});
+
+test('extractAnchors: ignora item senza top o non-string', () => {
+  const items = [
+    { str: '21100070' },                 // no top
+    { str: '21100071', top: NaN },
+    { str: 12345678, top: 100 },         // not string
+    { str: '00100208', top: 100 }
+  ];
+  const out = extractAnchors(items);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].codice, '00100208');
+});
+
+test('buildBandsFromAnchors: 1 anchor → banda piena pagina', () => {
+  const a = [{ codice: 'X', top: 200, item: {} }];
+  const bands = buildBandsFromAnchors(a, 0, 1000);
+  assert.equal(bands.length, 1);
+  assert.equal(bands[0].yTop, 0);
+  assert.equal(bands[0].yBottom, 1000);
+});
+
+test('buildBandsFromAnchors: 3 anchor → bordi a midpoint', () => {
+  const a = [
+    { codice: 'A', top: 100, item: {} },
+    { codice: 'B', top: 200, item: {} },
+    { codice: 'C', top: 350, item: {} }
+  ];
+  const bands = buildBandsFromAnchors(a, 0, 1000);
+  assert.equal(bands.length, 3);
+  assert.equal(bands[0].yTop, 0);
+  assert.equal(bands[0].yBottom, 150);
+  assert.equal(bands[1].yTop, 150);
+  assert.equal(bands[1].yBottom, 275);
+  assert.equal(bands[2].yTop, 275);
+  assert.equal(bands[2].yBottom, 1000);
+});
+
+test('buildBandsFromAnchors: input vuoto → []', () => {
+  assert.deepEqual(buildBandsFromAnchors([]), []);
+  assert.deepEqual(buildBandsFromAnchors(null), []);
+});
+
+test('collectBandItems: include solo top in [yTop, yBottom)', () => {
+  const items = [{ top: 100 }, { top: 150 }, { top: 200 }, { top: 250 }];
+  const band = { yTop: 150, yBottom: 250 };
+  const out = collectBandItems(items, band);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].top, 150);
+  assert.equal(out[1].top, 200);
+});
+
+test('classifyXBand: ritorna la fascia giusta o null', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  assert.equal(classifyXBand({ x0: 100 }, cols), 'code');
+  assert.equal(classifyXBand({ x0: 200 }, cols), 'descrizione');
+  assert.equal(classifyXBand({ x0: 480 }, cols), 'prezzo');
+  assert.equal(classifyXBand({ x0: 550 }, cols), 'compatibilita');
+  assert.equal(classifyXBand({ x0: 50 },  cols), 'noteLaterali');
+  assert.equal(classifyXBand({ x0: 700 }, cols), null);
+  assert.equal(classifyXBand({ x0: 100 }, null), null);
+});
+
+test('emitRowFromBand: caso base → riga con descrizione e prezzo', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '21100070', x0: 100, top: 215 };
+  const items = [
+    codeItem,
+    { str: 'Cono per cappellotto', x0: 165, top: 215 },
+    { str: '65,00',                x0: 480, top: 215 }
+  ];
+  const anchor = { codice: '21100070', top: 215, item: codeItem };
+  const row = emitRowFromBand(anchor, items, cols, 8);
+  assert.equal(row.codice, '21100070');
+  assert.equal(row.descrizione, 'Cono per cappellotto');
+  assert.equal(row.prezzo, 65);
+  assert.equal(row.pagina, '8');
+  assert.equal(row.review_flag, '');
+});
+
+test('emitRowFromBand: descrizione su 2 linee y diverse → concatenata in ordine top', () => {
+  // Caso §P3: descrizione che inizia sopra il codice e continua sotto
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '21100357', x0: 100, top: 420 };
+  const items = [
+    { str: 'Kit di 3 protezioni in plastica', x0: 165, top: 414 },
+    codeItem,
+    { str: '65,00',           x0: 480, top: 420 },
+    { str: 'per cappellotto', x0: 165, top: 426 }
+  ];
+  const anchor = { codice: '21100357', top: 420, item: codeItem };
+  const row = emitRowFromBand(anchor, items, cols, 16);
+  assert.match(row.descrizione, /^Kit di 3 protezioni in plastica per cappellotto$/);
+  assert.equal(row.prezzo, 65);
+  assert.equal(row.review_flag, '');
+});
+
+test('emitRowFromBand: nessun prezzo → PREZZO_MANCANTE', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '20100204', x0: 100, top: 300 };
+  const items = [codeItem, { str: 'Accessorio standard', x0: 165, top: 300 }];
+  const anchor = { codice: '20100204', top: 300, item: codeItem };
+  const row = emitRowFromBand(anchor, items, cols, 24);
+  assert.equal(row.prezzo, null);
+  assert.equal(row.review_flag, 'PREZZO_MANCANTE');
+  assert.equal(row.descrizione, 'Accessorio standard');
+});
+
+test('emitRowFromBand: due prezzi distinti nella banda → MULTI_PRICE', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '21100070', x0: 100, top: 215 };
+  const items = [
+    codeItem,
+    { str: 'Cono',  x0: 165, top: 215 },
+    { str: '65,00', x0: 480, top: 215 },
+    { str: '70,00', x0: 480, top: 220 }
+  ];
+  const anchor = { codice: '21100070', top: 215, item: codeItem };
+  const row = emitRowFromBand(anchor, items, cols, 8);
+  assert.equal(row.review_flag, 'MULTI_PRICE');
+});
+
+test('emitRowFromBand: senza columnBands → fallback (parsing diretto)', () => {
+  const codeItem = { str: '21100070', x0: 100, top: 215 };
+  const items = [
+    codeItem,
+    { str: 'Cono',  x0: 165, top: 215 },
+    { str: '65,00', x0: 480, top: 215 }
+  ];
+  const anchor = { codice: '21100070', top: 215, item: codeItem };
+  const row = emitRowFromBand(anchor, items, null, 8);
+  assert.equal(row.descrizione, 'Cono');
+  assert.equal(row.prezzo, 65);
+});
+
+test('emitRowFromBand: scarta item nelle fasce compatibilita/noteLaterali', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '21100070', x0: 100, top: 215 };
+  const items = [
+    codeItem,
+    { str: 'Cono',  x0: 165, top: 215 },
+    { str: 'S',     x0: 540, top: 215 }, // compatibilita → scarta
+    { str: 'x12',   x0: 50,  top: 215 }, // noteLaterali → scarta
+    { str: '65,00', x0: 480, top: 215 }
+  ];
+  const anchor = { codice: '21100070', top: 215, item: codeItem };
+  const row = emitRowFromBand(anchor, items, cols, 8);
+  assert.equal(row.descrizione, 'Cono');
+  assert.equal(row.prezzo, 65);
 });
 
 test('hasProductCode vs isCompleteProductRow', () => {
