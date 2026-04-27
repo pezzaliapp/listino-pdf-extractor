@@ -1,7 +1,7 @@
 {
   "name": "listino-pdf-extractor",
-  "version": "1.0.0",
-  "description": "PWA per estrarre listini prezzi da PDF e generare Excel multi-foglio",
+  "version": "3.0.0",
+  "description": "PWA per estrarre listini prezzi da PDF e generare Excel multi-foglio con classificazione per parole-chiave",
   "type": "module",
   "scripts": {
     "dev": "vite",

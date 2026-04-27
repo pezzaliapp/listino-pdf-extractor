@@ -22,7 +22,7 @@ export default defineConfig({
       manifest: {
         name: 'Listino PDF Extractor',
         short_name: 'ListinoPDF',
-        description: 'Estrae listini Cormach (e simili) da PDF in Excel multi-foglio',
+        description: 'Estrae listini PDF in Excel multi-foglio con classificazione per parole-chiave',
         theme_color: '#0b3d91',
         background_color: '#ffffff',
         display: 'standalone',

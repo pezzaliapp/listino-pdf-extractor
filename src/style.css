@@ -338,3 +338,130 @@ table td.flag-check {
   .container { padding: 18px 14px 32px; }
   .dropzone { padding: 28px 14px; }
 }
+
+/* Header actions cluster */
+.header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Admin drawer */
+#admin-drawer {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 25, 50, 0.55);
+  z-index: 1100;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 0;
+}
+#admin-drawer[hidden] { display: none; }
+
+.admin-modal {
+  background: #fff;
+  width: 100%;
+  max-width: 1100px;
+  max-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+.admin-header {
+  background: var(--primary);
+  color: #fff;
+  padding: 14px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.admin-header h2 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+.admin-body {
+  padding: 18px 22px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.admin-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.admin-tab {
+  background: transparent;
+  border: none;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+}
+.admin-tab.is-active {
+  color: var(--primary-dark);
+  border-bottom-color: var(--primary);
+}
+
+.admin-notice {
+  background: var(--primary-tint);
+  border-left: 4px solid var(--primary);
+  padding: 10px 14px;
+  font-size: 0.9rem;
+  border-radius: 4px;
+  margin-bottom: 14px;
+  color: var(--text);
+}
+
+.adm-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.adm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.adm-table th, .adm-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.adm-table th { background: var(--bg-alt); text-align: left; font-weight: 600; }
+.adm-table input[type="text"],
+.adm-table input[type="number"],
+.adm-table textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.adm-table textarea { resize: vertical; min-height: 50px; }
+.adm-actions { white-space: nowrap; }
+.adm-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  margin-right: 4px;
+}
+.adm-actions button:hover { background: var(--bg-alt); }
+tr.adm-invalid {
+  background: var(--warn-bg);
+}
+tr.adm-invalid input,
+tr.adm-invalid textarea { border-color: var(--warn); }
+
+.adm-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.adm-bar .btn { padding: 8px 14px; font-size: 0.9rem; }
+.adm-bar label.btn { cursor: pointer; }

@@ -5,6 +5,8 @@ import { ensureDisclaimerAccepted, showDisclaimer } from './disclaimer.js';
 import { showManual } from './manual.js';
 import { extractFromPdf } from './pdfParser.js';
 import { buildWorkbook, downloadWorkbook, buildOutputFilename } from './excelBuilder.js';
+import { classifyRow } from './classifier.js';
+import { bindAdminButton } from './admin.js';
 
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -13,8 +15,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const state = {
   rows: [],
+  parserLog: null,
   fileName: '',
-  pageCount: 0
+  pageCount: 0,
+  previewRows: []
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -38,12 +42,11 @@ function clearLog() {
   if (list) list.innerHTML = '';
 }
 
-function renderPreview(rows) {
+function renderPreview(previewRows) {
   const tbody = $('#preview-table tbody');
   if (!tbody) return;
   tbody.innerHTML = '';
-  const slice = rows.slice(0, 20);
-  for (const r of slice) {
+  for (const r of previewRows.slice(0, 20)) {
     const tr = document.createElement('tr');
     const tds = [
       r.Famiglia || '',
@@ -52,22 +55,42 @@ function renderPreview(rows) {
       r.Descrizione || '',
       formatEur(r.Prezzo_EUR),
       r.Pagine ?? '',
+      r.Match_Source || '',
       r.Review_Flag || ''
     ];
     tds.forEach((val, idx) => {
       const td = document.createElement('td');
       td.textContent = val;
-      if (idx === 6 && val === 'CHECK') td.classList.add('flag-check');
+      if (idx === 7 && val === 'CHECK') td.classList.add('flag-check');
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
   }
-  setHidden($('#preview-section'), rows.length === 0);
+  setHidden($('#preview-section'), previewRows.length === 0);
 }
 
 function formatEur(n) {
   if (n == null || isNaN(Number(n))) return '';
   return new Intl.NumberFormat('it-IT', { maximumFractionDigits: 0 }).format(Number(n));
+}
+
+async function buildPreview(rows) {
+  const out = [];
+  for (const r of rows.slice(0, 20)) {
+    const cls = await classifyRow({
+      descrizione: r.Descrizione,
+      prezzo: Number(r.Prezzo_EUR) || 0,
+      famigliaRaw: r.famigliaRaw,
+      categoriaRaw: r.categoriaRaw
+    });
+    out.push({
+      ...r,
+      Famiglia: cls.famiglia,
+      Categoria: cls.categoria,
+      Match_Source: cls.matchSource
+    });
+  }
+  return out;
 }
 
 async function handleFile(file) {
@@ -78,6 +101,8 @@ async function handleFile(file) {
   }
   state.fileName = file.name;
   state.rows = [];
+  state.parserLog = null;
+  state.previewRows = [];
   clearLog();
   setHidden($('#preview-section'), true);
 
@@ -95,16 +120,24 @@ async function handleFile(file) {
     state.pageCount = pdf.numPages;
     $('#file-pages').textContent = String(pdf.numPages);
 
-    const { rows } = await extractFromPdf(pdf, file.name, appendLog);
+    const { rows, parserLog } = await extractFromPdf(pdf, file.name, appendLog);
     state.rows = rows;
+    state.parserLog = parserLog;
 
     if (rows.length === 0) {
       appendLog('Nessuna riga prodotto riconosciuta. Verifica che il PDF contenga testo selezionabile e abbia il formato listino atteso.');
       $('#btn-download').disabled = true;
-    } else {
-      renderPreview(rows);
-      $('#btn-download').disabled = false;
+      return;
     }
+
+    state.previewRows = await buildPreview(rows);
+    renderPreview(state.previewRows);
+
+    const matchKw = state.previewRows.filter(r => r.Match_Source === 'keyword').length;
+    const pct = state.previewRows.length ? Math.round((matchKw / state.previewRows.length) * 100) : 0;
+    appendLog(`Match keyword (sulle prime ${state.previewRows.length}): ${pct}%.`);
+
+    $('#btn-download').disabled = false;
   } catch (err) {
     console.error(err);
     appendLog(`Errore durante l'elaborazione: ${err.message || err}`);
@@ -112,10 +145,14 @@ async function handleFile(file) {
   }
 }
 
-function downloadExcel() {
+async function downloadExcel() {
   if (!state.rows.length) return;
   try {
-    const wb = buildWorkbook(state.rows, state.fileName);
+    const wb = await buildWorkbook({
+      rows: state.rows,
+      parserLog: state.parserLog || { pages_total: 0, pages_with_text: 0, pages_image_only: 0, rows_extracted: state.rows.length, discarded: [] },
+      sourcePdfName: state.fileName
+    });
     const out = buildOutputFilename(state.fileName);
     downloadWorkbook(wb, out);
     appendLog(`Excel generato: ${out}`);
@@ -159,6 +196,7 @@ function bindUi() {
     e.preventDefault();
     showDisclaimer();
   });
+  bindAdminButton();
 }
 
 (async function init() {
