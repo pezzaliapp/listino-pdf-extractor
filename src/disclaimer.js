@@ -2,7 +2,7 @@
 
 import { get, set } from 'idb-keyval';
 
-export const DISCLAIMER_VERSION = 1;
+export const DISCLAIMER_VERSION = 2;
 const STORAGE_KEY = `disclaimer_accepted_v${DISCLAIMER_VERSION}`;
 
 const DISCLAIMER_HTML = `
@@ -15,7 +15,7 @@ const DISCLAIMER_HTML = `
     <li><strong>L'app non sostituisce il listino ufficiale.</strong> In caso di discrepanza fa fede esclusivamente il documento PDF originale del produttore.</li>
     <li><strong>Lo sviluppatore non è responsabile</strong> per perdite economiche, danni diretti o indiretti, errori di preventivazione, contestazioni con clienti o fornitori, sanzioni o qualsiasi altra conseguenza derivante dall'uso dei dati estratti.</li>
     <li><strong>Il PDF caricato non lascia il dispositivo:</strong> l'elaborazione avviene interamente nel browser.</li>
-    <li>I marchi citati (Cormach, GEO, ecc.) appartengono ai rispettivi proprietari e sono usati solo a fini descrittivi del formato del documento di input.</li>
+    <li><strong>Titolarità.</strong> Listino PDF Extractor è un progetto open-source di pezzaliapp. I marchi e i nomi commerciali eventualmente presenti nei PDF caricati dall'utente appartengono ai rispettivi proprietari e non sono in alcun modo affiliati o sponsorizzati dall'autore dell'app.</li>
   </ol>
   <h3>Procedendo dichiari di:</h3>
   <ul>
