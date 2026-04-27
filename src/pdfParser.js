@@ -1,23 +1,12 @@
-// PDF parsing utilities: text-content reconstruction into product rows.
-
-const FAMIGLIA_HEADINGS = {
-  'ASSETTI RUOTE': 'Assetti ruote',
-  'EQUILIBRATRICI': 'Equilibratrici',
-  'SMONTAGOMME': 'Smontagomme',
-  'SOLLEVATORI': 'Sollevatori',
-  'ATTREZZATURE VARIE': 'Attrezzature varie',
-  'INDUSTRIA 4.0': 'Industria 4.0',
-  'HANDY SCAN': 'Diagnosi',
-  'DIAGNOSI': 'Diagnosi'
-};
+// PDF parsing utilities for v4: code/description/price/page extraction with multi-line support.
 
 /**
- * Accetta SOLO formati di prezzo italiano "veri":
- *   "3.940,00", "880,00", "1.500,00", "250,00"
- * Rifiuta:
- *   "21.100.057" (3+ punti senza virgola = è un altro codice articolo)
- *   "21100076"   (8+ cifre senza separatori = codice)
- *   "abc", ""    (non numerico)
+ * Accept Italian price formats: "3.940,00", "880,00", "1.500", "1.500,00".
+ * Reject:
+ *   - "21.100.057" (3+ dots without comma → product code, not a price)
+ *   - "21100076"   (8+ digits without separators → product code)
+ *   - "36", "880"  (bare integers without separator → could be quantity, year, model — treat as not-a-price)
+ *   - "abc", ""
  */
 export function parsePriceString(s) {
   if (typeof s !== 'string') return null;
@@ -25,7 +14,8 @@ export function parsePriceString(s) {
   if (!t) return null;
   if (!/^\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$/.test(t)) return null;
   const dotGroups = t.split('.').length - 1;
-  if (dotGroups >= 2 && !t.includes(',')) return null; // tipo 21.100.057 → no
+  if (dotGroups >= 2 && !t.includes(',')) return null;
+  if (dotGroups === 0 && !t.includes(',')) return null;
   const n = Number(t.replace(/\./g, '').replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 }
@@ -35,17 +25,132 @@ export function isProductCode(s) {
   return /^\d{6,9}$/.test(s.replace(/[\s.]/g, ''));
 }
 
-export function isProductRow(tokens) {
+/** Una riga è "riga prodotto" se ha almeno un codice. (Il prezzo può anche
+    arrivare dalla riga successiva, vedi joinMultiLineRows.) */
+export function hasProductCode(tokens) {
+  if (!Array.isArray(tokens)) return false;
+  return tokens.some(t => isProductCode(t));
+}
+
+/** Una riga è "valida e completa" se ha codice E prezzo. */
+export function isCompleteProductRow(tokens) {
+  if (!Array.isArray(tokens)) return false;
   const codes = tokens.filter(t => isProductCode(t));
   const prices = tokens.map(t => parsePriceString(t)).filter(p => p !== null);
   return codes.length >= 1 && prices.length >= 1;
 }
 
-export function normalizeCode(token) {
-  return String(token || '').replace(/[.\s]/g, '');
+function normalizeCode(token) {
+  return String(token || '').replace(/[\s.]/g, '');
 }
 
-// Group pdf.js text items into visual lines using their Y coordinate.
+function lastValidPrice(tokens) {
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const v = parsePriceString(tokens[i]);
+    if (v !== null) return { idx: i, value: v };
+  }
+  return null;
+}
+
+function joinTokens(tokens) {
+  return tokens.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Unisce le righe di una pagina in righe-prodotto, gestendo descrizioni multi-riga
+ * (fino a 3 righe consecutive) come da SPEC v4 §3.3.
+ *
+ * Input:  linee[]  — array di { tokens: string[] }, già ordinate top→bottom.
+ *         pagina   — numero pagina (1-based).
+ * Output: array di { codice, descrizione, prezzo, pagina, review_flag }.
+ */
+export function joinMultiLineRows(linee, pagina) {
+  const rows = [];
+  let i = 0;
+  while (i < linee.length) {
+    const L = linee[i];
+    const tk = (L && L.tokens) || [];
+
+    if (!hasProductCode(tk)) { i += 1; continue; }
+
+    const codeIdx = tk.findIndex(t => isProductCode(t));
+    const codice = normalizeCode(tk[codeIdx]);
+    const pageStr = String(pagina);
+
+    if (isCompleteProductRow(tk)) {
+      const priceInfo = lastValidPrice(tk);
+      const desc = joinTokens(tk.slice(codeIdx + 1, priceInfo.idx));
+      rows.push({ codice, descrizione: desc, prezzo: priceInfo.value, pagina: pageStr, review_flag: '' });
+      i += 1;
+      continue;
+    }
+
+    const L1 = (i + 1 < linee.length) ? linee[i + 1] : null;
+    const L2 = (i + 2 < linee.length) ? linee[i + 2] : null;
+    const t1 = L1 ? ((L1.tokens) || []) : null;
+    const t2 = L2 ? ((L2.tokens) || []) : null;
+    const t1Price = t1 ? lastValidPrice(t1) : null;
+    const t2Price = t2 ? lastValidPrice(t2) : null;
+    const t1HasCode = t1 ? hasProductCode(t1) : false;
+    const t2HasCode = t2 ? hasProductCode(t2) : false;
+
+    // Caso B1: 2-line merge (riga successiva senza codice ma con prezzo)
+    if (t1 && !t1HasCode && t1Price) {
+      const descA = joinTokens(tk.slice(codeIdx + 1));
+      const descB = joinTokens(t1.slice(0, t1Price.idx));
+      const desc = `${descA} ${descB}`.replace(/\s+/g, ' ').trim();
+      rows.push({ codice, descrizione: desc, prezzo: t1Price.value, pagina: pageStr, review_flag: '' });
+      i += 2;
+      continue;
+    }
+
+    // Caso B2: 3-line merge (L1 continuazione pura, L2 con prezzo, nessuna delle 2 ha codice)
+    if (t1 && !t1HasCode && !t1Price && t2 && !t2HasCode && t2Price) {
+      const descA = joinTokens(tk.slice(codeIdx + 1));
+      const descB = joinTokens(t1);
+      const descC = joinTokens(t2.slice(0, t2Price.idx));
+      const desc = `${descA} ${descB} ${descC}`.replace(/\s+/g, ' ').trim();
+      rows.push({ codice, descrizione: desc, prezzo: t2Price.value, pagina: pageStr, review_flag: '' });
+      i += 3;
+      continue;
+    }
+
+    // Caso C: codice senza prezzo determinabile → CHECK
+    const desc = joinTokens(tk.slice(codeIdx + 1));
+    rows.push({ codice, descrizione: desc, prezzo: null, pagina: pageStr, review_flag: 'CHECK' });
+    i += 1;
+  }
+  return rows;
+}
+
+/** Aggregazione multi-pagina: per ogni codice, concatena pagine, mantiene primo
+ *  prezzo valido e flagga prezzi difformi tra occorrenze diverse. */
+export function aggregateAcrossPages(rowsByPage) {
+  const map = new Map();
+  for (const r of rowsByPage) {
+    const k = r.codice;
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(r);
+  }
+  const out = [];
+  for (const [, occurrences] of map.entries()) {
+    const valid = occurrences.filter(o => o.prezzo !== null);
+    const base = valid.length ? { ...valid[0] } : { ...occurrences[0] };
+    const allPages = [];
+    for (const o of occurrences) {
+      const ps = String(o.pagina || '').split(',').map(s => s.trim()).filter(Boolean);
+      for (const p of ps) if (!allPages.includes(p)) allPages.push(p);
+    }
+    base.pagina = allPages.join(', ');
+    const distinctPrices = [...new Set(valid.map(o => o.prezzo))];
+    if (distinctPrices.length > 1) base.review_flag = 'CHECK_PREZZO_DIFFORME';
+    out.push(base);
+  }
+  return out;
+}
+
+// === pdf.js layer ===
+
 export function groupItemsByLine(items, yTolerance = 2) {
   const lines = [];
   for (const item of items) {
@@ -61,155 +166,21 @@ export function groupItemsByLine(items, yTolerance = 2) {
     line.items.push({ str: item.str, x, size });
   }
   lines.sort((a, b) => b.y - a.y);
-  for (const line of lines) {
-    line.items.sort((a, b) => a.x - b.x);
-  }
+  for (const line of lines) line.items.sort((a, b) => a.x - b.x);
   return lines;
 }
 
-function lineText(line) {
-  return line.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
-}
-
-function lineMaxFontSize(line) {
-  return line.items.reduce((m, i) => Math.max(m, i.size || 0), 0);
-}
-
-function tokenize(text) {
+function lineToTokens(line) {
+  const text = line.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
   return text.split(/\s+/).filter(Boolean);
 }
 
-function detectFamigliaHeading(text) {
-  const upper = text.toUpperCase().trim();
-  if (FAMIGLIA_HEADINGS[upper]) return FAMIGLIA_HEADINGS[upper];
-  if (/^[A-ZÀ-Ý0-9 .\-/&]+$/.test(text) && /[A-ZÀ-Ý]/.test(text) && !/\d/.test(text) && text.length <= 60) {
-    return text.trim();
-  }
-  return null;
-}
-
-function looksLikeCategoryHeading(text) {
-  if (!text) return false;
-  if (/\d{4,}/.test(text)) return false;
-  if (text.length > 80) return false;
-  const firstChar = text.charAt(0);
-  if (firstChar !== firstChar.toUpperCase()) return false;
-  if (text === text.toUpperCase()) return false;
-  return true;
-}
-
-function findProductFields(tokens) {
-  let codeIdx = -1;
-  for (let i = 0; i < tokens.length; i++) {
-    if (isProductCode(tokens[i])) { codeIdx = i; break; }
-  }
-  if (codeIdx === -1) return null;
-
-  let priceIdx = -1;
-  let priceVal = null;
-  for (let i = tokens.length - 1; i > codeIdx; i--) {
-    const v = parsePriceString(tokens[i]);
-    if (v != null) { priceIdx = i; priceVal = v; break; }
-  }
-  if (priceIdx === -1) return null;
-  if (priceVal <= 0) return null;
-
-  const descTokens = tokens.slice(codeIdx + 1, priceIdx);
-  return {
-    code: normalizeCode(tokens[codeIdx]),
-    description: descTokens.join(' ').replace(/\s+/g, ' ').trim(),
-    price: priceVal
-  };
-}
-
-export function buildRowsFromLines(lines, pageNum, ctx, discarded = []) {
-  const rows = [];
-  for (const line of lines) {
-    const text = lineText(line);
-    if (!text) continue;
-
-    const tokens = tokenize(text);
-    const product = findProductFields(tokens);
-
-    if (product) {
-      const desc = product.description;
-      const reviewFlag = (!desc || desc.length < 5 || !/[A-Za-zÀ-ÿ]/.test(desc)) ? 'CHECK' : '';
-      rows.push({
-        famigliaRaw: ctx.famiglia || '',
-        categoriaRaw: ctx.categoria || '',
-        Codice: product.code,
-        Descrizione: desc,
-        Prezzo_EUR: product.price,
-        Pagine: String(pageNum),
-        Review_Flag: reviewFlag
-      });
-      continue;
-    }
-
-    // Heading detection only if no product fields.
-    const fontSize = lineMaxFontSize(line);
-    const fam = detectFamigliaHeading(text);
-    if (fam && (fontSize >= 11 || FAMIGLIA_HEADINGS[text.toUpperCase()])) {
-      ctx.famiglia = fam;
-      ctx.categoria = '';
-      continue;
-    }
-    if (looksLikeCategoryHeading(text) && fontSize >= 9) {
-      ctx.categoria = text.trim();
-      continue;
-    }
-
-    // Token-level potential row that didn't pass isProductRow → log discarded.
-    if (tokens.length >= 2 && tokens.some(t => isProductCode(t)) && !isProductRow(tokens)) {
-      discarded.push({ page: pageNum, reason: 'no-valid-price', tokens });
-    }
-  }
-  return rows;
-}
-
-/** Aggregate rows by Codice: keep first occurrence with valid price, concat Pagine. */
-export function aggregateRows(rows) {
-  const map = new Map();
-  for (const r of rows) {
-    const key = r.Codice;
-    if (!map.has(key)) {
-      map.set(key, { ...r, _pages: [r.Pagine], _count: 1 });
-    } else {
-      const existing = map.get(key);
-      existing._pages.push(r.Pagine);
-      existing._count += 1;
-    }
-  }
-  const out = [];
-  for (const r of map.values()) {
-    const uniquePages = [...new Set(r._pages.filter(Boolean))];
-    out.push({
-      famigliaRaw: r.famigliaRaw,
-      categoriaRaw: r.categoriaRaw,
-      Codice: r.Codice,
-      Descrizione: r.Descrizione,
-      Prezzo_EUR: r.Prezzo_EUR,
-      Pagine: uniquePages.join(', '),
-      Occorrenze: r._count,
-      Review_Flag: r.Review_Flag
-    });
-  }
-  return out;
-}
-
-/**
- * Main extractor: takes a pdf.js PDFDocumentProxy and returns
- * { rows, parserLog: { pages_total, pages_with_text, pages_image_only, rows_extracted, discarded } }.
- */
-export async function extractFromPdf(pdf, fileName, onLog = () => {}) {
-  const pushLog = (msg) => { onLog(msg); };
-  const ctx = { famiglia: '', categoria: '' };
-  const rawRows = [];
-  const discarded = [];
-
+/** Estrae righe-prodotto da un PDFDocumentProxy di pdfjs-dist. */
+export async function extractFromPdfDocument(pdf, onLog = () => {}) {
   const pages_total = pdf.numPages;
   let pages_with_text = 0;
   let pages_image_only = 0;
+  const allRows = [];
 
   for (let pageNum = 1; pageNum <= pages_total; pageNum++) {
     const page = await pdf.getPage(pageNum);
@@ -217,38 +188,37 @@ export async function extractFromPdf(pdf, fileName, onLog = () => {}) {
     try {
       textContent = await page.getTextContent();
     } catch (err) {
-      pushLog(`Pagina ${pageNum}: errore di lettura testo (${err.message || err}), saltata.`);
+      onLog(`Pagina ${pageNum}: errore di lettura testo (${err.message || err}), saltata.`);
       continue;
     }
     const items = textContent.items || [];
     if (!items.length) {
-      pages_image_only++;
-      pushLog(`Pagina ${pageNum}: nessun testo estraibile (probabilmente immagine), saltata.`);
+      pages_image_only += 1;
+      onLog(`Pagina ${pageNum}: nessun testo estraibile (probabilmente immagine), saltata.`);
       continue;
     }
-    pages_with_text++;
-    const lines = groupItemsByLine(items, 2);
-    const pageRows = buildRowsFromLines(lines, pageNum, ctx, discarded);
-    for (const r of pageRows) {
-      r.Fonte = fileName;
-      rawRows.push(r);
-    }
+    pages_with_text += 1;
+    const visualLines = groupItemsByLine(items, 2);
+    const linee = visualLines.map(vl => ({ tokens: lineToTokens(vl) }));
+    const pageRows = joinMultiLineRows(linee, pageNum);
+    for (const r of pageRows) allRows.push(r);
   }
 
-  const rows = aggregateRows(rawRows);
+  const rows = aggregateAcrossPages(allRows);
+  const rows_in_check = rows.filter(r => r.review_flag).length;
 
-  pushLog(`Pagine totali: ${pages_total} (con testo: ${pages_with_text}, solo immagine: ${pages_image_only}).`);
-  pushLog(`Righe estratte: ${rows.length}.`);
-  if (discarded.length) pushLog(`Righe scartate (senza prezzo valido): ${discarded.length}.`);
+  onLog(`Pagine totali: ${pages_total} (con testo: ${pages_with_text}, solo immagine: ${pages_image_only}).`);
+  onLog(`Righe estratte: ${rows.length}.`);
+  if (rows_in_check) onLog(`Righe in CHECK: ${rows_in_check}.`);
 
   return {
     rows,
-    parserLog: {
+    meta: {
       pages_total,
       pages_with_text,
       pages_image_only,
       rows_extracted: rows.length,
-      discarded
+      rows_in_check
     }
   };
 }

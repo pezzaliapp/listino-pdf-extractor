@@ -3,10 +3,8 @@
 import './style.css';
 import { ensureDisclaimerAccepted, showDisclaimer } from './disclaimer.js';
 import { showManual } from './manual.js';
-import { extractFromPdf } from './pdfParser.js';
+import { extractFromPdfDocument } from './pdfParser.js';
 import { buildWorkbook, downloadWorkbook, buildOutputFilename } from './excelBuilder.js';
-import { classifyRow } from './classifier.js';
-import { bindAdminButton } from './admin.js';
 
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -15,10 +13,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const state = {
   rows: [],
-  parserLog: null,
-  fileName: '',
-  pageCount: 0,
-  previewRows: []
+  meta: null,
+  fileName: ''
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -42,55 +38,33 @@ function clearLog() {
   if (list) list.innerHTML = '';
 }
 
-function renderPreview(previewRows) {
-  const tbody = $('#preview-table tbody');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-  for (const r of previewRows.slice(0, 20)) {
-    const tr = document.createElement('tr');
-    const tds = [
-      r.Famiglia || '',
-      r.Categoria || '',
-      r.Codice || '',
-      r.Descrizione || '',
-      formatEur(r.Prezzo_EUR),
-      r.Pagine ?? '',
-      r.Match_Source || '',
-      r.Review_Flag || ''
-    ];
-    tds.forEach((val, idx) => {
-      const td = document.createElement('td');
-      td.textContent = val;
-      if (idx === 7 && val === 'CHECK') td.classList.add('flag-check');
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  }
-  setHidden($('#preview-section'), previewRows.length === 0);
-}
-
 function formatEur(n) {
   if (n == null || isNaN(Number(n))) return '';
   return new Intl.NumberFormat('it-IT', { maximumFractionDigits: 0 }).format(Number(n));
 }
 
-async function buildPreview(rows) {
-  const out = [];
+function renderPreview(rows) {
+  const tbody = $('#preview-table tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
   for (const r of rows.slice(0, 20)) {
-    const cls = await classifyRow({
-      descrizione: r.Descrizione,
-      prezzo: Number(r.Prezzo_EUR) || 0,
-      famigliaRaw: r.famigliaRaw,
-      categoriaRaw: r.categoriaRaw
+    const tr = document.createElement('tr');
+    const tds = [
+      r.codice || '',
+      r.descrizione || '',
+      formatEur(r.prezzo),
+      r.pagina ?? '',
+      r.review_flag || ''
+    ];
+    tds.forEach((val, idx) => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      if (idx === 4 && val) td.classList.add('flag-check');
+      tr.appendChild(td);
     });
-    out.push({
-      ...r,
-      Famiglia: cls.famiglia,
-      Categoria: cls.categoria,
-      Match_Source: cls.matchSource
-    });
+    tbody.appendChild(tr);
   }
-  return out;
+  setHidden($('#preview-section'), rows.length === 0);
 }
 
 async function handleFile(file) {
@@ -101,8 +75,7 @@ async function handleFile(file) {
   }
   state.fileName = file.name;
   state.rows = [];
-  state.parserLog = null;
-  state.previewRows = [];
+  state.meta = null;
   clearLog();
   setHidden($('#preview-section'), true);
 
@@ -117,26 +90,19 @@ async function handleFile(file) {
   try {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    state.pageCount = pdf.numPages;
     $('#file-pages').textContent = String(pdf.numPages);
 
-    const { rows, parserLog } = await extractFromPdf(pdf, file.name, appendLog);
+    const { rows, meta } = await extractFromPdfDocument(pdf, appendLog);
     state.rows = rows;
-    state.parserLog = parserLog;
+    state.meta = meta;
 
     if (rows.length === 0) {
-      appendLog('Nessuna riga prodotto riconosciuta. Verifica che il PDF contenga testo selezionabile e abbia il formato listino atteso.');
+      appendLog('Nessuna riga prodotto riconosciuta. Verifica che il PDF contenga testo selezionabile.');
       $('#btn-download').disabled = true;
       return;
     }
 
-    state.previewRows = await buildPreview(rows);
-    renderPreview(state.previewRows);
-
-    const matchKw = state.previewRows.filter(r => r.Match_Source === 'keyword').length;
-    const pct = state.previewRows.length ? Math.round((matchKw / state.previewRows.length) * 100) : 0;
-    appendLog(`Match keyword (sulle prime ${state.previewRows.length}): ${pct}%.`);
-
+    renderPreview(rows);
     $('#btn-download').disabled = false;
   } catch (err) {
     console.error(err);
@@ -145,12 +111,12 @@ async function handleFile(file) {
   }
 }
 
-async function downloadExcel() {
+function downloadExcel() {
   if (!state.rows.length) return;
   try {
-    const wb = await buildWorkbook({
+    const wb = buildWorkbook({
       rows: state.rows,
-      parserLog: state.parserLog || { pages_total: 0, pages_with_text: 0, pages_image_only: 0, rows_extracted: state.rows.length, discarded: [] },
+      meta: state.meta || { pages_total: 0, rows_extracted: state.rows.length, rows_in_check: 0 },
       sourcePdfName: state.fileName
     });
     const out = buildOutputFilename(state.fileName);
@@ -196,7 +162,6 @@ function bindUi() {
     e.preventDefault();
     showDisclaimer();
   });
-  bindAdminButton();
 }
 
 (async function init() {
