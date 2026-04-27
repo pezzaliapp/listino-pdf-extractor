@@ -152,6 +152,61 @@ export function aggregateAcrossPages(rowsByPage) {
 // === pdf.js layer ===
 
 /**
+ * M2 — Detection automatica delle fasce X di una pagina-tabella.
+ * Input: array di item { str, x0, x1 } (forma normalizzata, derivata altrove
+ *        dai text item di pdfjs).
+ * Output: { code, descrizione, prezzo, compatibilita, noteLaterali } dove
+ *         ogni fascia è una coppia [xMin, xMax]. `null` se mancano
+ *         abbastanza ancore (codici 8 cifre + prezzi).
+ *
+ * Le fasce sono ricavate da:
+ *   - xCodeLeft  = moda(x0) dei codici 8 cifre
+ *   - xPriceLeft = moda(x0) dei prezzi italiani (1.234,56[ €])
+ *   - xPriceRight= moda(x1) dei prezzi
+ */
+export function computeColumnBands(items, pageWidth = Infinity) {
+  if (!Array.isArray(items) || !items.length) return null;
+  const priceRe = /^\d{1,3}(?:\.\d{3})*,\d{2}(?:\s*€)?$/;
+  const codeRe = /^\d{8}$/;
+  const prices = [];
+  const codes = [];
+  for (const it of items) {
+    if (!it) continue;
+    const t = String(it.str || '').trim();
+    if (!t) continue;
+    if (priceRe.test(t)) prices.push(it);
+    else if (codeRe.test(t)) codes.push(it);
+  }
+  if (!prices.length || !codes.length) return null;
+  const xPriceLeft  = _modeOfRounded(prices.map(it => it.x0));
+  const xPriceRight = _modeOfRounded(prices.map(it => it.x1));
+  const xCodeLeft   = _modeOfRounded(codes.map(it => it.x0));
+  return {
+    code:          [xCodeLeft - 5, xCodeLeft + 60],
+    descrizione:   [xCodeLeft + 60, xPriceLeft - 10],
+    prezzo:        [xPriceLeft - 10, xPriceRight + 10],
+    compatibilita: [xPriceRight + 10, pageWidth],
+    noteLaterali:  [0, xCodeLeft - 5],
+    _anchors: { xCodeLeft, xPriceLeft, xPriceRight }
+  };
+}
+
+function _modeOfRounded(values) {
+  const ints = values
+    .filter(v => typeof v === 'number' && Number.isFinite(v))
+    .map(v => Math.round(v));
+  if (!ints.length) return 0;
+  const counts = new Map();
+  for (const v of ints) counts.set(v, (counts.get(v) || 0) + 1);
+  let modal = ints[0];
+  let best = 0;
+  for (const [v, n] of counts.entries()) {
+    if (n > best) { best = n; modal = v; }
+  }
+  return modal;
+}
+
+/**
  * M8 — bucket Y proporzionale al font dominante.
  * Filtra i font del corpo (6-12pt, esclude header e icone), prende la moda
  * arrotondata e ritorna moda*0.4. Cade su `fallback` (2pt) se non trova
