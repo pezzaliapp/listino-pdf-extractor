@@ -2,7 +2,7 @@
 
 import { get, set } from 'idb-keyval';
 
-export const DISCLAIMER_VERSION = 4;
+export const DISCLAIMER_VERSION = 5;
 const STORAGE_KEY = `disclaimer_accepted_v${DISCLAIMER_VERSION}`;
 
 const DISCLAIMER_HTML = `
@@ -16,7 +16,7 @@ const DISCLAIMER_HTML = `
     <li><strong>Lo sviluppatore non è responsabile</strong> per perdite economiche, danni diretti o indiretti, errori di preventivazione, contestazioni con clienti o fornitori, sanzioni o qualsiasi altra conseguenza derivante dall'uso dei dati estratti.</li>
     <li><strong>Il PDF caricato non lascia il dispositivo:</strong> l'elaborazione avviene interamente nel browser.</li>
     <li><strong>Titolarità.</strong> Listino PDF Extractor è un progetto open-source di <strong>pezzaliapp</strong>. I marchi e i nomi commerciali eventualmente presenti nei PDF caricati dall'utente appartengono ai rispettivi proprietari e non sono in alcun modo affiliati o sponsorizzati dall'autore dell'app.</li>
-    <li><strong>Cosa fa l'app.</strong> Estrae da un PDF di listino le seguenti informazioni: codice articolo, descrizione, prezzo, pagina del PDF in cui appare. <strong>Non</strong> classifica gli articoli per famiglia o categoria, <strong>non</strong> suggerisce upselling o tier commerciali. La classificazione, se necessaria, è responsabilità dell'utente che potrà arricchire l'Excel di output con i propri strumenti (VLOOKUP, gestionale aziendale, ecc.).</li>
+    <li><strong>Cosa fa l'app.</strong> Estrae da un PDF di listino: codice articolo, descrizione, prezzo, pagina del PDF, e una colonna <code>Sezione</code> (metadato derivato <strong>euristicamente</strong> dal titolo della pagina del PDF e da marker tipo "ACCESSORI STANDARD" / "OPTIONAL"). La <code>Sezione</code> <strong>non</strong> è una classificazione tassonomica: è un'indicazione di provenienza la cui correttezza dipende dal layout del PDF di origine e va verificata. L'app <strong>non</strong> suggerisce upselling, <strong>non</strong> calcola sconti né tier commerciali. La classificazione vera, se necessaria, è responsabilità dell'utente che potrà arricchire l'Excel di output con i propri strumenti (VLOOKUP, gestionale aziendale, ecc.).</li>
     <li><strong>Trattamento dati.</strong> Tutti i PDF caricati restano nel browser dell'utente. L'app non raccoglie analytics, telemetria o identificativi.</li>
   </ol>
   <h3>Procedendo dichiari di:</h3>
