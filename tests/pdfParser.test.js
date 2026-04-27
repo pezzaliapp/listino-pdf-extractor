@@ -5,7 +5,8 @@ import {
   computeYBucket, computeColumnBands,
   filterVerticalHeaders, filterSideNotes, SIDE_NOTE_PATTERNS,
   normalizePdfjsItem, extractAnchors, buildBandsFromAnchors,
-  collectBandItems, classifyXBand, emitRowFromBand
+  collectBandItems, classifyXBand, emitRowFromBand,
+  stripIconText, ICON_STRINGS
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -395,6 +396,132 @@ test('emitRowFromBand: senza columnBands → fallback (parsing diretto)', () => 
   const row = emitRowFromBand(anchor, items, null, 8);
   assert.equal(row.descrizione, 'Cono');
   assert.equal(row.prezzo, 65);
+});
+
+// === M4 — icon text filter ===
+
+test('ICON_STRINGS contiene le icone documentate dalla SPEC', () => {
+  // verifica solo alcuni rappresentativi (la set completa è nel sorgente)
+  for (const s of ['AUTO', 'LASER', 'MOBILE SERVICE', 'NLS', 'B', 'P', 'L', 'A', 'C', 'MI']) {
+    assert.equal(ICON_STRINGS.has(s), true, `manca icona "${s}"`);
+  }
+});
+
+test('stripIconText: nominale — rimuove "AUTO" se arriva come 4 char singoli', () => {
+  // Caso §P4: AUTO renderizzato come 4 char singoli sotto la descrizione.
+  const items = [
+    { str: 'MEC',   x0: 165, x1: 195, top: 215 },
+    { str: 'A',     x0: 200, x1: 207, top: 215 },
+    { str: 'U',     x0: 207, x1: 214, top: 215 },
+    { str: 'T',     x0: 214, x1: 220, top: 215 },
+    { str: 'O',     x0: 220, x1: 227, top: 215 },
+    { str: 'TRUCK', x0: 235, x1: 270, top: 215 }
+  ];
+  const out = stripIconText(items);
+  // Run di 4 char singoli che spelleranno "AUTO" → tutti rimossi (fase 2)
+  assert.equal(out.length, 2);
+  assert.equal(out[0].str, 'MEC');
+  assert.equal(out[1].str, 'TRUCK');
+});
+
+test('stripIconText: ambiguo — rimuove "B" isolato (length=1, width<20, in ICON_STRINGS)', () => {
+  const items = [
+    { str: 'B',    x0: 200, x1: 210, top: 215 },  // width=10 < 20 → fase 1: REMOVE
+    { str: 'Cono', x0: 165, x1: 195, top: 215 }
+  ];
+  const out = stripIconText(items);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].str, 'Cono');
+});
+
+test('stripIconText: ambiguo — tiene "B" dentro "BMW" (str non in ICON_STRINGS)', () => {
+  const items = [
+    { str: 'BMW',  x0: 200, x1: 220, top: 215 },  // length=3 ma 'BMW' ∉ ICON_STRINGS
+    { str: 'Cono', x0: 165, x1: 195, top: 215 }
+  ];
+  const out = stripIconText(items);
+  assert.equal(out.length, 2);
+});
+
+test('stripIconText: tiene "B" largo (width >= 20pt) — non lo considera icona', () => {
+  // Lettera "L" larga, e.g. usata in un header tipografico → width=22 ≥ 20 → KEEP
+  const items = [
+    { str: 'L',    x0: 200, x1: 222, top: 215 },
+    { str: 'Cono', x0: 165, x1: 195, top: 215 }
+  ];
+  const out = stripIconText(items);
+  assert.equal(out.length, 2);
+});
+
+test('stripIconText: spezzato su 2 y vicine (single-char run) — rimuove "MOBILE SERVICE"', () => {
+  // 13 char singoli che, in ordine top↑/x0↑, spellano "MOBILESERVICE".
+  // La fase 2 trova il match contro l'icona "MOBILE SERVICE" (spazio rimosso).
+  // NB: NON è il vero caso mirror-via-PDF-transform di §P4 (vedi LIMITE NOTO
+  // su stripIconText) — qui i char arrivano in ordine corretto su due y vicine.
+  const items = [
+    { str: 'Sistema', x0: 165, x1: 200, top: 699 },
+    { str: 'M', x0: 330, x1: 332, top: 699 },
+    { str: 'O', x0: 333, x1: 335, top: 699 },
+    { str: 'B', x0: 336, x1: 338, top: 699 },
+    { str: 'I', x0: 339, x1: 341, top: 699 },
+    { str: 'L', x0: 342, x1: 344, top: 699 },
+    { str: 'E', x0: 345, x1: 347, top: 699 },
+    { str: 'S', x0: 330, x1: 332, top: 702 },
+    { str: 'E', x0: 333, x1: 335, top: 702 },
+    { str: 'R', x0: 336, x1: 338, top: 702 },
+    { str: 'V', x0: 339, x1: 341, top: 702 },
+    { str: 'I', x0: 342, x1: 344, top: 702 },
+    { str: 'C', x0: 345, x1: 347, top: 702 },
+    { str: 'E', x0: 348, x1: 350, top: 702 }
+  ];
+  const out = stripIconText(items);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].str, 'Sistema');
+});
+
+test('stripIconText: run di 2 char singoli non triggera fase 2 (soglia minima = 3)', () => {
+  // 2 char singoli "G","T" che spellerebbero icona "GT" (length=2)
+  // Ma la fase 2 considera solo icone length ≥ 3 e run di ≥ 3 char → niente match
+  const items = [
+    { str: 'Cono', x0: 165, x1: 195, top: 215 },
+    { str: 'G', x0: 200, x1: 207, top: 215 },
+    { str: 'T', x0: 207, x1: 214, top: 215 }
+  ];
+  const out = stripIconText(items);
+  // Fase 1: 'G' non è in ICON_STRINGS → keep. 'T' non è in ICON_STRINGS → keep.
+  assert.equal(out.length, 3);
+});
+
+test('stripIconText: input vuoto/non-array → []', () => {
+  assert.deepEqual(stripIconText([]), []);
+  assert.deepEqual(stripIconText(null), []);
+  assert.deepEqual(stripIconText(undefined), []);
+});
+
+test('emitRowFromBand: cabla M4 — descrizione finale non contiene "AUTO" residuo', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '01200115', x0: 100, x1: 140, top: 627 };
+  const items = [
+    codeItem,
+    { str: 'MEC',   x0: 165, x1: 195, top: 630 },
+    { str: '200A',  x0: 200, x1: 230, top: 630 },
+    { str: 'TRUCK', x0: 235, x1: 270, top: 630 },
+    // icona AUTO renderizzata come 4 char singoli su y leggermente diversa
+    { str: 'A',     x0: 200, x1: 207, top: 633 },
+    { str: 'U',     x0: 207, x1: 214, top: 633 },
+    { str: 'T',     x0: 214, x1: 220, top: 633 },
+    { str: 'O',     x0: 220, x1: 227, top: 633 },
+    { str: '10.500,00', x0: 480, x1: 510, top: 627 }
+  ];
+  const anchor = { codice: '01200115', top: 627, item: codeItem };
+  const row = emitRowFromBand(anchor, items, cols, 22);
+  assert.equal(row.codice, '01200115');
+  assert.match(row.descrizione, /^MEC 200A TRUCK$/);
+  assert.equal(row.prezzo, 10500);
+  assert.equal(row.review_flag, '');
 });
 
 test('emitRowFromBand: scarta item nelle fasce compatibilita/noteLaterali', () => {

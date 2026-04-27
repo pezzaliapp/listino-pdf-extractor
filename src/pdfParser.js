@@ -317,6 +317,78 @@ function lineToTokens(line) {
   return text.split(/\s+/).filter(Boolean);
 }
 
+/**
+ * M4 — Whitelist di stringhe icona presenti nei badge grafici dei PDF Cormach.
+ * Usata da stripIconText con due criteri distinti (per-item e sequenza).
+ */
+export const ICON_STRINGS = new Set([
+  'AUTO', 'LASER', 'STOP', 'NLS', 'ESD', 'RLC', 'SONAR',
+  'NEW', 'MOBILE SERVICE', 'GT', 'BAS',
+  'VD', 'VDL', 'VDLL', 'VDBL',
+  'B', 'P', 'L', 'A', 'C', 'MI'
+]);
+
+// Per la fase 2 (rilevamento di run di char singoli) consideriamo solo le
+// icone di length ≥ 3 una volta rimossi gli spazi. Le icone di 1-2 char
+// causerebbero troppi falsi positivi se cercate dentro una sequenza arbitraria.
+const _ICON_STRINGS_NOSPACE_GE3 = [...ICON_STRINGS]
+  .map(s => s.replace(/\s+/g, ''))
+  .filter(s => s.length >= 3);
+
+/**
+ * M4 — Filtro icone testuali. Due fasi indipendenti, accumulate in un solo
+ * removeSet poi applicate sull'array originale.
+ *
+ *  Fase 1 (per-item):  un item con `length ≤ 3 AND width < 20pt AND str ∈ ICON_STRINGS`
+ *                      è un'icona isolata → rimossa.
+ *  Fase 2 (sequenza):  un run di ≥ 3 item consecutivi con `length === 1` la cui
+ *                      concatenazione (forward o reverse) contiene un'icona di
+ *                      length ≥ 3 viene rimosso integralmente.
+ *
+ * Le due fasi NON dipendono dall'ordine: la fase 1 non può "consumare" lettere
+ * che servono alla fase 2 perché entrambe leggono dalla stessa lista originale.
+ *
+ * LIMITE NOTO: non gestisce stringhe multi-char già reversed dal PDF transform
+ * (es. 'ECIVRE' per 'SERVICE', pattern P4 SPEC v5 pag. 25). Coperti: char
+ * singoli sparsi su una o due y vicine.
+ */
+export function stripIconText(items) {
+  if (!Array.isArray(items)) return [];
+  const removeSet = new Set();
+
+  // Fase 1: icone isolate corte
+  for (const it of items) {
+    if (!it) continue;
+    const t = String(it.str || '').trim();
+    if (!t) continue;
+    if (t.length > 3) continue;
+    if (!ICON_STRINGS.has(t)) continue;
+    const w = Number(it.x1) - Number(it.x0);
+    if (Number.isFinite(w) && w < 20) removeSet.add(it);
+  }
+
+  // Fase 2: run di char singoli che spellano un'icona
+  const sorted = [...items]
+    .filter(it => it && typeof it.str === 'string')
+    .sort((a, b) => (Number(a.top) - Number(b.top)) || (Number(a.x0) - Number(b.x0)));
+  let i = 0;
+  while (i < sorted.length) {
+    if (String(sorted[i].str).trim().length !== 1) { i++; continue; }
+    let j = i;
+    while (j < sorted.length && String(sorted[j].str).trim().length === 1) j++;
+    if (j - i >= 3) {
+      const run = sorted.slice(i, j);
+      const fwd = run.map(r => r.str).join('');
+      const rev = [...fwd].reverse().join('');
+      const hit = _ICON_STRINGS_NOSPACE_GE3.some(icon => fwd.includes(icon) || rev.includes(icon));
+      if (hit) for (const r of run) removeSet.add(r);
+    }
+    i = j;
+  }
+
+  return items.filter(it => !removeSet.has(it));
+}
+
 // === M1 — anchor-first row-band extraction ===
 
 /**
@@ -422,7 +494,7 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
   if (!anchor) return null;
   const items = Array.isArray(bandItems) ? bandItems : [];
   const sorted = [...items].sort((a, b) => (a.top - b.top) || (a.x0 - b.x0));
-  const descParts = [];
+  const descItems = [];
   let prezzo = null;
   let multiPrice = false;
 
@@ -441,7 +513,7 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
           else if (v !== prezzo) multiPrice = true;
         }
       } else if (cls === 'descrizione') {
-        descParts.push(t);
+        descItems.push(it);
       }
       // 'code' | 'compatibilita' | 'noteLaterali' | null → skip
     } else {
@@ -451,12 +523,20 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
         if (prezzo === null) prezzo = v;
         else if (v !== prezzo) multiPrice = true;
       } else {
-        descParts.push(t);
+        descItems.push(it);
       }
     }
   }
 
-  const descrizione = descParts.join(' ').replace(/\s+/g, ' ').trim();
+  // M4 — strip icon text dai descItems prima di comporre la descrizione
+  const cleanDescItems = stripIconText(descItems);
+  const descrizione = cleanDescItems
+    .map(it => String(it.str || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   let review_flag = '';
   if (multiPrice) review_flag = 'MULTI_PRICE';
   else if (prezzo === null) review_flag = 'PREZZO_MANCANTE';
