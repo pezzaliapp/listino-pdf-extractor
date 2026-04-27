@@ -39,7 +39,7 @@ export const MANUAL_HTML = `
         <h2>3. Cosa contiene l'Excel</h2>
         <ul>
           <li><strong><code>00_Info</code></strong>: metadati di estrazione (file di origine, pagine, righe estratte, righe in CHECK, versione app).</li>
-          <li><strong><code>Listino</code></strong>: una riga per articolo, 5 colonne — <code>Codice</code>, <code>Descrizione</code>, <code>Prezzo_EUR</code>, <code>Pagina</code>, <code>Review_Flag</code>.</li>
+          <li><strong><code>Listino</code></strong>: una riga per articolo, 6 colonne — <code>Codice</code>, <code>Descrizione</code>, <code>Prezzo_EUR</code>, <code>Pagina</code>, <code>Review_Flag</code>, <code>Sezione</code> (titolo della pagina del PDF e, se presente, il sotto-marker tipo <em>"ACCESSORI STANDARD"</em>).</li>
         </ul>
       </section>
 

@@ -7,7 +7,8 @@ import {
   normalizePdfjsItem, extractAnchors, buildBandsFromAnchors,
   collectBandItems, classifyXBand, emitRowFromBand,
   stripIconText, ICON_STRINGS,
-  mergeMultiCodeRows
+  mergeMultiCodeRows,
+  detectPageTitle, findSectionMarkers, assignSectionToRow
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -615,6 +616,104 @@ test('mergeMultiCodeRows: non muta l\'input originale', () => {
   const out = mergeMultiCodeRows(rows);
   assert.equal(JSON.stringify(rows), snapshot);                       // input invariato
   assert.equal(out[1].review_flag, 'MERGED_FROM_PREV');               // copia modificata
+});
+
+// === M6 — section detection ===
+
+test('detectPageTitle: trova item con fontSize > 16 e top < 80', () => {
+  const items = [
+    { str: 'EQUILIBRATRICI', x0: 100, x1: 250, top: 40, fontSize: 22 },
+    { str: 'Cono', x0: 100, x1: 130, top: 200, fontSize: 9 }
+  ];
+  assert.equal(detectPageTitle(items), 'EQUILIBRATRICI');
+});
+
+test('detectPageTitle: ignora font grande FUORI dalla fascia top<80', () => {
+  const items = [
+    { str: 'GRANDE MA BASSO', x0: 100, x1: 250, top: 200, fontSize: 22 },
+    { str: 'Cono',            x0: 100, x1: 130, top: 250, fontSize: 9 }
+  ];
+  assert.equal(detectPageTitle(items), '');
+});
+
+test('detectPageTitle: pagina senza titolo riconoscibile → "" (default sicuro)', () => {
+  const items = [{ str: 'Cono', x0: 100, x1: 130, top: 200, fontSize: 9 }];
+  assert.equal(detectPageTitle(items), '');
+  assert.equal(detectPageTitle([]), '');
+  assert.equal(detectPageTitle(null), '');
+});
+
+test('findSectionMarkers: rileva ACCESSORI STANDARD / OPTIONAL / OPTIONAL CONSIGLIATI', () => {
+  const items = [
+    { str: 'ACCESSORI STANDARD',   x0: 100, x1: 250, top: 200 },
+    { str: 'OPTIONAL',             x0: 100, x1: 200, top: 400 },
+    { str: 'OPTIONAL CONSIGLIATI', x0: 100, x1: 280, top: 600 }
+  ];
+  const out = findSectionMarkers(items);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].text, 'ACCESSORI STANDARD');
+  assert.equal(out[0].top, 200);
+  assert.equal(out[1].text, 'OPTIONAL');
+  assert.equal(out[2].text, 'OPTIONAL CONSIGLIATI');
+});
+
+test('findSectionMarkers: rileva marker spezzato in 2 token sulla stessa y', () => {
+  const items = [
+    { str: 'ACCESSORI', x0: 100, x1: 165, top: 200 },
+    { str: 'STANDARD',  x0: 170, x1: 230, top: 200 }
+  ];
+  const out = findSectionMarkers(items);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].text, 'ACCESSORI STANDARD');
+  assert.equal(out[0].top, 200);
+});
+
+test('findSectionMarkers: ignora item che non sono marker noti', () => {
+  const items = [
+    { str: 'Note libere',     x0: 100, x1: 200, top: 200 },
+    { str: 'EQUILIBRATRICI',  x0: 100, x1: 250, top: 40, fontSize: 22 }
+  ];
+  assert.deepEqual(findSectionMarkers(items), []);
+});
+
+test('assignSectionToRow: row dopo marker → "TITOLO > MARKER"', () => {
+  const markers = [{ text: 'ACCESSORI STANDARD', top: 200 }];
+  assert.equal(
+    assignSectionToRow(300, 'EQUILIBRATRICI', markers),
+    'EQUILIBRATRICI > ACCESSORI STANDARD'
+  );
+});
+
+test('assignSectionToRow: row PRIMA del primo marker → solo "TITOLO"', () => {
+  const markers = [{ text: 'ACCESSORI STANDARD', top: 200 }];
+  assert.equal(assignSectionToRow(100, 'EQUILIBRATRICI', markers), 'EQUILIBRATRICI');
+});
+
+test('assignSectionToRow: row tra due marker → "TITOLO > MARKER più recente"', () => {
+  const markers = [
+    { text: 'ACCESSORI STANDARD', top: 200 },
+    { text: 'OPTIONAL',           top: 400 }
+  ];
+  assert.equal(assignSectionToRow(300, 'EQUILIBRATRICI', markers), 'EQUILIBRATRICI > ACCESSORI STANDARD');
+  assert.equal(assignSectionToRow(500, 'EQUILIBRATRICI', markers), 'EQUILIBRATRICI > OPTIONAL');
+});
+
+test('assignSectionToRow: pagina senza titolo riconoscibile → "" (default sicuro)', () => {
+  assert.equal(assignSectionToRow(300, '', []),    '');
+  assert.equal(assignSectionToRow(300, null, null), '');
+  assert.equal(assignSectionToRow(300, undefined, undefined), '');
+});
+
+test('assignSectionToRow: titolo vuoto + marker presente → solo MARKER (defensive)', () => {
+  const markers = [{ text: 'ACCESSORI STANDARD', top: 200 }];
+  assert.equal(assignSectionToRow(300, '', markers), 'ACCESSORI STANDARD');
+});
+
+test('assignSectionToRow: yAnchor invalido (NaN) → titolo (defensive, mai null)', () => {
+  const markers = [{ text: 'ACCESSORI STANDARD', top: 200 }];
+  const out = assignSectionToRow(NaN, 'EQUILIBRATRICI', markers);
+  assert.equal(out, 'EQUILIBRATRICI');
+  assert.equal(typeof out, 'string');
 });
 
 test('emitRowFromBand: scarta item nelle fasce compatibilita/noteLaterali', () => {

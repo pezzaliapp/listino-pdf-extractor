@@ -20,13 +20,14 @@ export function buildWorkbook({ rows, meta, sourcePdfName }) {
   XLSX.utils.book_append_sheet(wb, wsInfo, '00_Info');
 
   // 2. Foglio Listino
-  const headers = ['Codice', 'Descrizione', 'Prezzo_EUR', 'Pagina', 'Review_Flag'];
+  const headers = ['Codice', 'Descrizione', 'Prezzo_EUR', 'Pagina', 'Review_Flag', 'Sezione'];
   const data = [headers, ...rows.map(r => [
     r.codice,
     r.descrizione || '',
     r.prezzo ?? '',
     r.pagina,
-    r.review_flag || ''
+    r.review_flag || '',
+    r.sezione || ''                              // M6 — sempre stringa, mai undefined
   ])];
   const wsListino = XLSX.utils.aoa_to_sheet(data);
 
@@ -48,7 +49,7 @@ export function buildWorkbook({ rows, meta, sourcePdfName }) {
   }
 
   wsListino['!cols'] = [
-    { wch: 12 }, { wch: 60 }, { wch: 12 }, { wch: 10 }, { wch: 24 }
+    { wch: 12 }, { wch: 60 }, { wch: 12 }, { wch: 10 }, { wch: 24 }, { wch: 32 }
   ];
   XLSX.utils.book_append_sheet(wb, wsListino, 'Listino');
 

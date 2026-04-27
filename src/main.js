@@ -54,7 +54,8 @@ function renderPreview(rows) {
       r.descrizione || '',
       formatEur(r.prezzo),
       r.pagina ?? '',
-      r.review_flag || ''
+      r.review_flag || '',
+      r.sezione || ''                              // M6
     ];
     tds.forEach((val, idx) => {
       const td = document.createElement('td');

@@ -550,6 +550,106 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
   };
 }
 
+// === M6 — Section detection ===
+
+const SECTION_MARKERS = new Set([
+  'ACCESSORI STANDARD',
+  'OPTIONAL',
+  'OPTIONAL CONSIGLIATI',
+  'ACCESSORI OPTIONAL'
+]);
+
+/**
+ * M6 — Estrae il titolo pagina (font > 16pt nella fascia top < 80pt).
+ * Ritorna stringa trimmata o '' se non riconosciuto. Mai null/undefined.
+ */
+export function detectPageTitle(items) {
+  if (!Array.isArray(items)) return '';
+  const candidates = [];
+  for (const it of items) {
+    if (!it || typeof it.str !== 'string') continue;
+    const t = it.str.trim();
+    if (!t) continue;
+    const fs = Number(it.fontSize);
+    const top = Number(it.top);
+    if (!Number.isFinite(fs) || fs <= 16) continue;
+    if (!Number.isFinite(top) || top >= 80) continue;
+    candidates.push({ str: t, fontSize: fs, top });
+  }
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => (b.fontSize - a.fontSize) || (a.top - b.top));
+  return candidates[0].str;
+}
+
+/**
+ * M6 — Trova i marker di sotto-sezione sulla pagina ("ACCESSORI STANDARD" /
+ * "OPTIONAL" / "OPTIONAL CONSIGLIATI" / "ACCESSORI OPTIONAL").
+ *
+ * Strategia: raggruppa gli item per riga visiva (top simile entro 2pt),
+ * concatena il testo della riga, fa match esatto (uppercase, spazi normalizzati)
+ * contro la whitelist. Gestisce sia marker single-token sia spezzati in 2-3
+ * token sulla stessa y.
+ *
+ * Ritorna lista `{ text, top }` ordinata per top crescente. Mai null.
+ *
+ * LIMITE NOTO: il match è esatto (line-text uppercased+space-normalized ===
+ * marker). Marker spezzati su 3+ token con tolleranze di y > 2pt, oppure in
+ * formato esotico (case mista, accenti, suffissi tipo "ACCESSORI STANDARD A"),
+ * non vengono catturati. Da rivisitare in v5.1 se compaiono.
+ */
+export function findSectionMarkers(items) {
+  if (!Array.isArray(items)) return [];
+  const sorted = items
+    .filter(it => it && typeof it.str === 'string')
+    .sort((a, b) => (Number(a.top) - Number(b.top)) || (Number(a.x0) - Number(b.x0)));
+  const lines = [];
+  for (const it of sorted) {
+    const top = Number(it.top);
+    if (!Number.isFinite(top)) continue;
+    const last = lines[lines.length - 1];
+    const piece = String(it.str || '').trim();
+    if (!piece) continue;
+    if (last && Math.abs(last.top - top) <= 2) {
+      last.text += ' ' + piece;
+    } else {
+      lines.push({ top, text: piece });
+    }
+  }
+  const out = [];
+  for (const line of lines) {
+    const norm = line.text.toUpperCase().replace(/\s+/g, ' ').trim();
+    if (SECTION_MARKERS.has(norm)) {
+      out.push({ text: norm, top: line.top });
+    }
+  }
+  out.sort((a, b) => a.top - b.top);
+  return out;
+}
+
+/**
+ * M6 — Determina la sezione di una row dato il suo yAnchor, il titolo pagina
+ * e la lista di marker (ordinata per top crescente).
+ *  - Trova il marker più recente con top < yAnchor (marker attivo a quella altezza).
+ *  - Se trovato e titolo presente: ritorna `"TITOLO > MARKER"`.
+ *  - Solo titolo: ritorna `TITOLO`.
+ *  - Solo marker (senza titolo): ritorna `MARKER`.
+ *  - Niente di niente: ritorna `''`.
+ *
+ * Garantisce stringa, mai null/undefined.
+ */
+export function assignSectionToRow(yAnchor, pageTitle, markers) {
+  const title = String(pageTitle || '').trim();
+  const yA = Number(yAnchor);
+  if (!Array.isArray(markers) || !Number.isFinite(yA)) return title;
+  let active = null;
+  for (const m of markers) {
+    if (Number(m.top) < yA) active = m;
+    else break;
+  }
+  if (active) return title ? `${title} > ${active.text}` : active.text;
+  return title;
+}
+
 /**
  * M5 — Merge multi-codice (intra-page).
  *
@@ -647,12 +747,19 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
       items = filterSideNotes(items, cols.noteLaterali);
     }
 
+    // M6 — section detection (titolo pagina + marker sotto-sezione)
+    const pageTitle = detectPageTitle(items);
+    const sectionMarkers = findSectionMarkers(items);
+
     const bands = buildBandsFromAnchors(anchors, 0, pageHeight);
     const pageRows = [];
     for (const band of bands) {
       const bandItems = collectBandItems(items, band);
       const row = emitRowFromBand(band.anchor, bandItems, cols, pageNum);
-      if (row) pageRows.push({ ...row, yAnchor: band.anchor.top });
+      if (row) {
+        row.sezione = assignSectionToRow(band.anchor.top, pageTitle, sectionMarkers);
+        pageRows.push({ ...row, yAnchor: band.anchor.top });
+      }
     }
 
     // M5 — merge multi-codice intra-page
