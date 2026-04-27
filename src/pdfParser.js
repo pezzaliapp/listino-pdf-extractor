@@ -151,6 +151,28 @@ export function aggregateAcrossPages(rowsByPage) {
 
 // === pdf.js layer ===
 
+/**
+ * M8 — bucket Y proporzionale al font dominante.
+ * Filtra i font del corpo (6-12pt, esclude header e icone), prende la moda
+ * arrotondata e ritorna moda*0.4. Cade su `fallback` (2pt) se non trova
+ * font del corpo.
+ */
+export function computeYBucket(fontSizes, fallback = 2) {
+  if (!Array.isArray(fontSizes) || !fontSizes.length) return fallback;
+  const bodyFonts = fontSizes
+    .filter(s => typeof s === 'number' && s >= 6 && s <= 12)
+    .map(s => Math.round(s));
+  if (!bodyFonts.length) return fallback;
+  const counts = new Map();
+  for (const s of bodyFonts) counts.set(s, (counts.get(s) || 0) + 1);
+  let modal = bodyFonts[0];
+  let best = 0;
+  for (const [s, n] of counts.entries()) {
+    if (n > best) { best = n; modal = s; }
+  }
+  return modal * 0.4;
+}
+
 export function groupItemsByLine(items, yTolerance = 2) {
   const lines = [];
   for (const item of items) {
@@ -198,7 +220,9 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
       continue;
     }
     pages_with_text += 1;
-    const visualLines = groupItemsByLine(items, 2);
+    const fontSizes = items.map(it => Math.abs(it.transform[0]));
+    const yBucket = computeYBucket(fontSizes);
+    const visualLines = groupItemsByLine(items, yBucket);
     const linee = visualLines.map(vl => ({ tokens: lineToTokens(vl) }));
     const pageRows = joinMultiLineRows(linee, pageNum);
     for (const r of pageRows) allRows.push(r);
