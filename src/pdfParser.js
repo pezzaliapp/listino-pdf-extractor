@@ -207,6 +207,45 @@ function _modeOfRounded(values) {
 }
 
 /**
+ * M9 — Pattern noti delle "note laterali" (marker quantità/dimensioni a sinistra
+ * della colonna codice). Esportati per riuso/test.
+ */
+export const SIDE_NOTE_PATTERNS = [
+  /^x\d+$/,            // x4, x12, x24
+  /^\(\d+\s*pcs?\)$/,  // (2pcs), (3pc), (15pcs)
+  /^Ø\s*mm\s*\d+$/     // Ømm58, Ømm145
+];
+
+/**
+ * M9 — Filtro note laterali.
+ * Rimuove i text item che cadono nella `FASCIA_NOTE_LATERALI` (calcolata da
+ * computeColumnBands), sono brevi (length ≤ 6) e matchano uno dei pattern
+ * noti di SIDE_NOTE_PATTERNS. Tutti gli altri item vengono mantenuti.
+ *
+ * Nota: la SPEC §M9 fissa il limite a length ≤ 6. Stringhe più lunghe come
+ * "(2 pcs)" con spazio (7 char) o "Ø mm 58" (7 char) non vengono filtrate
+ * con questa soglia: è una scelta volutamente conservativa.
+ */
+export function filterSideNotes(items, noteLateraliBand) {
+  if (!Array.isArray(items)) return [];
+  if (!Array.isArray(noteLateraliBand) || noteLateraliBand.length !== 2) return items;
+  const [xMin, xMax] = noteLateraliBand;
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) return items;
+  return items.filter(it => {
+    if (!it) return false;
+    const t = String(it.str || '').trim();
+    if (!t) return true;
+    const x0 = Number(it.x0);
+    if (!Number.isFinite(x0)) return true;
+    const inBand = x0 >= xMin && x0 < xMax;
+    if (!inBand) return true;
+    if (t.length > 6) return true;
+    const isNote = SIDE_NOTE_PATTERNS.some(re => re.test(t));
+    return !isNote;
+  });
+}
+
+/**
  * M3 — Filtro header verticale (rotated header).
  * Identifica i text item che sono caratteri 1-2 di intestazioni di colonna
  * ruotate 90° (es. "TOUCH MEC 2000S" sparpagliato come singole lettere

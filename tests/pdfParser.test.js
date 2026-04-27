@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePriceString, isProductCode, hasProductCode, isCompleteProductRow, computeYBucket, computeColumnBands, filterVerticalHeaders } from '../src/pdfParser.js';
+import { parsePriceString, isProductCode, hasProductCode, isCompleteProductRow, computeYBucket, computeColumnBands, filterVerticalHeaders, filterSideNotes, SIDE_NOTE_PATTERNS } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
   assert.equal(parsePriceString('3.940,00'), 3940);
@@ -136,6 +136,70 @@ test('filterVerticalHeaders: senza primo anchor, ritorna items invariati', () =>
   ];
   assert.equal(filterVerticalHeaders(items, undefined).length, 2);
   assert.equal(filterVerticalHeaders(items, NaN).length, 2);
+});
+
+test('SIDE_NOTE_PATTERNS riconoscono i marker quantità/dimensione documentati', () => {
+  const matches = (s) => SIDE_NOTE_PATTERNS.some(re => re.test(s));
+  assert.equal(matches('x4'),   true);
+  assert.equal(matches('x12'),  true);
+  assert.equal(matches('x24'),  true);
+  assert.equal(matches('(2pcs)'),  true);
+  assert.equal(matches('(15pcs)'), true);
+  assert.equal(matches('Ømm58'),   true);
+  // non-match
+  assert.equal(matches('xyz'),  false);
+  assert.equal(matches('Cono'), false);
+  assert.equal(matches('880,00'), false);
+});
+
+test('filterSideNotes: rimuove "x12" dentro la fascia note laterali', () => {
+  // FASCIA_NOTE_LATERALI = [0, 95]
+  const items = [
+    { str: 'x12', x0: 40,  x1: 60 },           // dentro band, breve, pattern → REMOVE
+    { str: 'x4',  x0: 50,  x1: 65 },           // dentro band, breve, pattern → REMOVE
+    { str: '21100070', x0: 100, x1: 140 },     // fuori band → keep
+    { str: 'Cono Ø42', x0: 165, x1: 240 }      // fuori band → keep
+  ];
+  const out = filterSideNotes(items, [0, 95]);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].str, '21100070');
+  assert.equal(out[1].str, 'Cono Ø42');
+});
+
+test('filterSideNotes: tiene marker fuori dalla fascia', () => {
+  // x12 a x0=200 è ben dentro la descrizione (NON nelle note laterali)
+  const items = [
+    { str: 'x12', x0: 200, x1: 220 },
+    { str: '21100070', x0: 100, x1: 140 }
+  ];
+  const out = filterSideNotes(items, [0, 95]);
+  assert.equal(out.length, 2);
+});
+
+test('filterSideNotes: tiene token in band ma non matcha pattern', () => {
+  // "ABC" è in band e breve ma non è un pattern noto → keep
+  const items = [
+    { str: 'ABC', x0: 50, x1: 70 },
+    { str: '21100070', x0: 100, x1: 140 }
+  ];
+  const out = filterSideNotes(items, [0, 95]);
+  assert.equal(out.length, 2);
+});
+
+test('filterSideNotes: tiene token in band se length > 6 (soglia conservativa)', () => {
+  // "(2 pcs)" = 7 char → non filtrato anche se matcha il regex \(\d+\s*pcs?\)
+  const items = [
+    { str: '(2 pcs)', x0: 50, x1: 80 }
+  ];
+  const out = filterSideNotes(items, [0, 95]);
+  assert.equal(out.length, 1);
+});
+
+test('filterSideNotes: senza fascia valida ritorna items invariati', () => {
+  const items = [{ str: 'x12', x0: 40, x1: 60 }];
+  assert.equal(filterSideNotes(items, null).length, 1);
+  assert.equal(filterSideNotes(items, [NaN, 95]).length, 1);
+  assert.equal(filterSideNotes(items, [0]).length, 1);
 });
 
 test('hasProductCode vs isCompleteProductRow', () => {
