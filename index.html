@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="./icon-192.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b3d91" />
+    <meta name="description" content="Estrae listini Cormach (e simili) da PDF in Excel multi-foglio." />
+    <title>Listino PDF Extractor</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <h1 class="brand">
+          <span aria-hidden="true">🧾</span>
+          <span>Listino PDF Extractor</span>
+        </h1>
+        <button id="btn-manual" class="btn btn-ghost" type="button" aria-haspopup="dialog">
+          📖 Manuale
+        </button>
+      </header>
+
+      <main class="container">
+        <section class="dropzone" id="dropzone" aria-label="Area di caricamento PDF">
+          <p class="dropzone-title">Trascina qui il PDF del listino</p>
+          <p class="dropzone-or">oppure</p>
+          <label for="file-input" class="btn btn-primary">Scegli file</label>
+          <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
+        </section>
+
+        <section id="file-info" class="file-info hidden" aria-live="polite">
+          <p>File caricato: <strong id="file-name">—</strong> (<span id="file-pages">—</span> pagine)</p>
+        </section>
+
+        <section id="preview-section" class="preview hidden">
+          <h2>Anteprima righe estratte (prime 20)</h2>
+          <div class="table-wrap">
+            <table id="preview-table">
+              <thead>
+                <tr>
+                  <th>Famiglia</th>
+                  <th>Categoria</th>
+                  <th>Codice</th>
+                  <th>Descrizione</th>
+                  <th>Prezzo €</th>
+                  <th>Pag.</th>
+                  <th>Flag</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="actions" class="actions hidden">
+          <button id="btn-download" class="btn btn-primary" type="button" disabled>
+            ⬇ Scarica Excel
+          </button>
+        </section>
+
+        <section id="log-section" class="log hidden" aria-live="polite">
+          <h2>Log</h2>
+          <ul id="log-list"></ul>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>v1.0.0</span>
+        <span>·</span>
+        <span>© 2026</span>
+        <span>·</span>
+        <span>AS-IS, no warranty</span>
+        <span>·</span>
+        <a href="#" id="link-disclaimer">Disclaimer</a>
+      </footer>
+    </div>
+
+    <div id="modal-root"></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
