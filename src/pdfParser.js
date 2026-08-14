@@ -323,6 +323,21 @@ export function isSubstantialDesc(desc) {
   return ch === ch.toUpperCase() && ch !== ch.toLowerCase();
 }
 
+/** Rimuove da una descrizione il "rumore di layout" che cola sulle didascalie
+ *  dei box ACCESSORI STANDARD: la parola-marker di sezione ("OPTIONAL",
+ *  "ACCESSORI STANDARD"…), le note-quantità "(3 pcs)" e le note-dimensione
+ *  "Ø mm 145". Serve a valutare se resta una VERA descrizione: un frammento
+ *  come "OPTIONAL" o "Ø mm 58 Ø mm 74" inizia con una maiuscola ma non è un
+ *  nome-prodotto, quindi non deve salvare il codice dalla sezione Dotazioni. */
+export function stripLayoutNoise(desc) {
+  return String(desc == null ? '' : desc)
+    .replace(/Ø\s*mm\s*\d+/gi, ' ')                            // note dimensione (Ø non-ASCII: niente \b)
+    .replace(/\(\s*\d+\s*pcs?\s*\)/gi, ' ')                    // note quantità "(3 pcs)"
+    .replace(/\b(?:ACCESSORI\s+STANDARD|ACCESSORI\s+OPTIONAL|OPTIONAL\s+CONSIGLIATI|OPTIONAL)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Pattern A — separa le occorrenze-didascalia (righe pre-aggregazione, ognuna
  * su una sola pagina) dalle vere righe di listino.
@@ -371,7 +386,13 @@ export function classifyDidascalie(allRows) {
   for (const [code, occs] of byCode.entries()) {
     const neverPriced = occs.every(_isNoPrice);
     if (!neverPriced) continue;
-    const hasSubstantial = occs.some(o => isSubstantialDesc(o.descrizione));
+    // Una descrizione "salva" il codice dalla sezione Dotazioni solo se è un
+    // vero nome-prodotto: i frammenti di layout (marker di sezione, note
+    // quantità/dimensione) che colano sulle didascalie del box vengono tolti
+    // prima del controllo, così l'INTERO box ACCESSORI STANDARD va in Dotazioni
+    // anche quando su una scheda ripetuta un codice ha raccolto "OPTIONAL" o
+    // "Ø mm 145".
+    const hasSubstantial = occs.some(o => isSubstantialDesc(stripLayoutNoise(o.descrizione)));
     if (hasSubstantial) continue;
     const inAccStandard = occs.some(o => ACCESSORI_STD_RE.test(String(o.sezione || '')));
     const allDegenerate = occs.every(o => isDegenerateDesc(o.descrizione));

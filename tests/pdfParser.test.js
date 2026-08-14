@@ -11,7 +11,7 @@ import {
   detectPageTitle, findSectionMarkers, assignSectionToRow,
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
-  stripOptionalBanner
+  stripOptionalBanner, stripLayoutNoise
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1200,4 +1200,45 @@ test('emitRowFromBand: il banner OPTIONAL non diventa descrizione', () => {
   ];
   const row = emitRowFromBand(anchor, items, cols, 8);
   assert.equal(row.descrizione, '');
+});
+
+// === Intervento 1 — box ACCESSORI STANDARD uniforme (rumore di layout) ===
+
+test('stripLayoutNoise: rimuove marker sezione, note quantità e dimensione', () => {
+  assert.equal(stripLayoutNoise('OPTIONAL'), '');
+  assert.equal(stripLayoutNoise('Ø mm 145'), '');
+  assert.equal(stripLayoutNoise('Ø mm 58 Ø mm 74 Ø mm 120'), '');
+  assert.equal(stripLayoutNoise('(3 pcs)'), '');
+  assert.equal(stripLayoutNoise('OPTIONAL (3 pcs)'), '');
+  // una vera descrizione sopravvive
+  assert.equal(stripLayoutNoise('Gruppo esterno per gonfiaggio'), 'Gruppo esterno per gonfiaggio');
+  assert.equal(stripLayoutNoise('Pinza OPTIONAL'), 'Pinza');
+});
+
+test('classifyDidascalie: frammento di layout maiuscolo NON salva il codice dal box → Dotazioni', () => {
+  // Come pag.24-25: il codice sta nel box ACCESSORI STANDARD (desc vuota) e su
+  // una scheda ripetuta ha raccolto un frammento maiuscolo di layout
+  // ("OPTIONAL", "Ø mm 145"): non è un nome-prodotto, l'intero box va in Dotazioni.
+  const rows = [
+    { codice: '90000010', descrizione: '',          prezzo: null, pagina: '24', review_flag: 'PREZZO_MANCANTE', sezione: 'S1 > ACCESSORI STANDARD' },
+    { codice: '90000010', descrizione: 'OPTIONAL',   prezzo: null, pagina: '25', review_flag: 'PREZZO_MANCANTE', sezione: 'S2' },
+    { codice: '90000011', descrizione: '',           prezzo: null, pagina: '24', review_flag: 'PREZZO_MANCANTE', sezione: 'S1 > ACCESSORI STANDARD' },
+    { codice: '90000011', descrizione: 'Ø mm 145',   prezzo: null, pagina: '25', review_flag: 'PREZZO_MANCANTE', sezione: 'S2' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(mainRows.length, 0);                 // niente più frammenti nel Listino
+  assert.deepEqual(dotazioni.map(d => d.codice).sort(), ['90000010', '90000011']);
+});
+
+test('classifyDidascalie: una vera descrizione-prodotto continua a salvare il codice (nessuna regressione)', () => {
+  // Un nome-prodotto reale su una pagina matrice NON deve finire in Dotazioni:
+  // resta nel Listino (poi completato da Pattern B).
+  const rows = [
+    { codice: '90000012', descrizione: '',                          prezzo: null, pagina: '27', review_flag: 'PREZZO_MANCANTE', sezione: 'S1 > ACCESSORI STANDARD' },
+    { codice: '90000012', descrizione: 'Gruppo esterno di gonfiaggio', prezzo: null, pagina: '29', review_flag: 'PREZZO_MANCANTE', sezione: 'S3' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);
+  assert.equal(mainRows.length, 1);
+  assert.equal(mainRows[0].pagina, '29');
 });
