@@ -20,8 +20,8 @@ Strumento fornito **AS-IS**, senza garanzie. L'estrazione automatica può conten
 
 | Codice | Descrizione | Prezzo_EUR | Pagina | Review_Flag |
 |---|---|---|---|---|
-| 00100208 | PUMA CE 1ph 230V 50-60Hz | 3940 | 6 | |
-| 21100375 | KIT SMART APP: Include traffico dati per 36 mesi… | 880 | 6 | |
+| 01230045 | ACME 100 CE 1ph 230V 50-60Hz | 2750 | 6 | |
+| 01230067 | KIT SMART APP: Include traffico dati per 36 mesi… | 1290 | 6 | |
 | 99999999 | Articolo isolato senza prezzo | (vuoto) | 10 | CHECK |
 
 `Review_Flag` può essere:
@@ -109,13 +109,24 @@ La v5 mantiene il design minimale della v4 (un'app, un job: estrarre dati tabell
 | M4 | Filtro icone testuali | Rimuove "AUTO" / "MOBILE SERVICE" / "B" isolata da descrizione |
 | M5 | Merge multi-codice | Coppia di codici che condividono cella → una riga + un `MERGED_FROM_PREV` |
 | M6 | Sezione corrente | Aggiunge colonna `Sezione` come metadato derivato |
-| M7 | Foglio Accessori_Standard | Split di `Listino` + nuovo foglio dedicato + bump versione 5.0.0 |
+| M7 | Foglio Dotazioni standard | Split di `Listino` + foglio dedicato ai codici-didascalia |
 
-### Nuovi valori di `Review_Flag` attivi in v5
+### v5.3 — Pattern strutturali del PDF
+
+| Pattern | Descrizione |
+|---------|-------------|
+| A | **Codici-didascalia**: i codici sotto le foto del box ACCESSORI STANDARD non entrano nel Listino; se mai prezzati vanno nel foglio `Dotazioni standard` con `CODICE_DIDASCALIA` |
+| B | **Celle condivise verticali**: descrizione ricomposta propagata a tutti i codici del gruppo-matrice; prezzo propagato solo se unico (`DESCRIZIONE_GRUPPO` / `PREZZO_GRUPPO`) |
+| C | **Banner ricorrente**: `ACCESSORI OPTIONAL a pag. N` rimosso dalle descrizioni |
+
+### Valori di `Review_Flag`
 
 - `PREZZO_MANCANTE` — codice senza prezzo nella sua banda
 - `MULTI_PRICE` — banda con più prezzi distinti
-- `MERGED_FROM_PREV` — riga ricostruita via merge multi-codice
+- `MERGED_FROM_PREV` / `MERGED_FROM_NEXT` — riga ricostruita via merge multi-codice
+- `DESCRIZIONE_GRUPPO` / `PREZZO_GRUPPO` — descrizione/prezzo presi da una cella-matrice condivisa (v5.3, Pattern B)
+- `DESC_PARZIALE` — descrizione finale che inizia in minuscola o è solo una parentesi (v5.3, mai emessa in silenzio)
+- `CODICE_DIDASCALIA` — codice-didascalia del box ACCESSORI STANDARD, foglio `Dotazioni standard` (v5.3, Pattern A)
 - `CHECK_PREZZO_DIFFORME` — codice presente su più pagine con prezzi diversi (ereditato da v4)
 
 ## Limitazioni note v5

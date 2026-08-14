@@ -13,6 +13,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const state = {
   rows: [],
+  dotazioni: [],
   meta: null,
   fileName: ''
 };
@@ -76,6 +77,7 @@ async function handleFile(file) {
   }
   state.fileName = file.name;
   state.rows = [];
+  state.dotazioni = [];
   state.meta = null;
   clearLog();
   setHidden($('#preview-section'), true);
@@ -93,8 +95,9 @@ async function handleFile(file) {
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     $('#file-pages').textContent = String(pdf.numPages);
 
-    const { rows, meta } = await extractFromPdfDocument(pdf, appendLog);
+    const { rows, dotazioni, meta } = await extractFromPdfDocument(pdf, appendLog);
     state.rows = rows;
+    state.dotazioni = dotazioni || [];
     state.meta = meta;
 
     if (rows.length === 0) {
@@ -118,6 +121,7 @@ function downloadExcel() {
   try {
     const wb = buildWorkbook({
       rows: state.rows,
+      dotazioni: state.dotazioni || [],
       meta: state.meta || { pages_total: 0, rows_extracted: state.rows.length, rows_in_check: 0 },
       sourcePdfName: state.fileName
     });

@@ -1,4 +1,11 @@
-// Excel workbook builder v5: 3 sheets (00_Info + Listino + Accessori_Standard).
+// Excel workbook builder v5.3: 3 fogli (00_Info + Listino + Dotazioni standard).
+//
+// Il foglio "Dotazioni standard" raccoglie i codici-didascalia riconosciuti dal
+// parser (Pattern A): codici stampati sotto le foto nei box ACCESSORI STANDARD,
+// mai prezzati nel PDF. Non sono righe di listino, ma l'informazione su quali
+// macchine li montano di serie è utile e va conservata. La separazione avviene
+// a monte, in src/pdfParser.js (classifyDidascalie): qui ci limitiamo a
+// impaginare i due insiemi già distinti.
 
 import * as XLSX from 'xlsx';
 
@@ -6,39 +13,6 @@ const LISTINO_HEADERS = ['Codice', 'Descrizione', 'Prezzo_EUR', 'Pagina', 'Revie
 const LISTINO_COL_WIDTHS = [
   { wch: 12 }, { wch: 60 }, { wch: 12 }, { wch: 10 }, { wch: 24 }, { wch: 32 }
 ];
-
-const ACCESSORI_SECTION_KEYWORDS = ['ACCESSORI STANDARD', 'OPTIONAL', 'OPTIONAL CONSIGLIATI'];
-
-/**
- * M7 — Partiziona le righe v5 in due insiemi:
- *  - listino:    righe normali (vanno nel foglio "Listino")
- *  - accessori:  righe senza prezzo proprio in sezione accessori-standard
- *                (vanno nel foglio "Accessori_Standard")
- *
- * Criterio (esatto, AND):
- *   1. prezzo === null OR prezzo === '' OR prezzo === undefined
- *   2. sezione (uppercase) include una di:
- *        "ACCESSORI STANDARD" / "OPTIONAL" / "OPTIONAL CONSIGLIATI"
- *
- * Una row con prezzo mancante MA sezione non-accessori (es. "EQUILIBRATRICI >
- * Touch MEC 2000S") RESTA in Listino con il suo Review_Flag (tipicamente
- * 'PREZZO_MANCANTE'): è un caso da rivedere a mano, non un accessorio incluso.
- */
-export function partitionRowsByAccessoriStandard(rows) {
-  const listino = [];
-  const accessori = [];
-  if (!Array.isArray(rows)) return { listino, accessori };
-  for (const r of rows) {
-    if (!r) continue;
-    const noPrezzo = r.prezzo === null || r.prezzo === '' || r.prezzo === undefined;
-    if (!noPrezzo) { listino.push(r); continue; }
-    const sezione = String(r.sezione || '').toUpperCase();
-    const isAccessorio = ACCESSORI_SECTION_KEYWORDS.some(kw => sezione.includes(kw));
-    if (isAccessorio) accessori.push(r);
-    else listino.push(r);
-  }
-  return { listino, accessori };
-}
 
 /**
  * Costruisce un worksheet con la struttura standard del Listino (6 colonne).
@@ -78,30 +52,34 @@ function buildListinoSheet(rows) {
   return ws;
 }
 
-export function buildWorkbook({ rows, meta, sourcePdfName }) {
+export function buildWorkbook({ rows, dotazioni, meta, sourcePdfName }) {
   const wb = XLSX.utils.book_new();
+  const m = meta || {};
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeDotazioni = Array.isArray(dotazioni) ? dotazioni : [];
 
-  // 1. Foglio 00_Info (con Versione_Parser = 5.0.0)
+  // 1. Foglio 00_Info
   const infoData = [
-    ['File di origine',  sourcePdfName || ''],
-    ['Pagine totali',    meta.pages_total ?? 0],
-    ['Righe estratte',   meta.rows_extracted ?? (Array.isArray(rows) ? rows.length : 0)],
-    ['Righe in CHECK',   meta.rows_in_check ?? 0],
-    ['Generato il',      new Date().toISOString()],
-    ['Versione app',     '5.0.0'],
-    ['Versione_Parser',  '5.0.0'],
-    ['Avvertenza',       'Strumento AS-IS. Verificare sempre i dati estratti rispetto al PDF originale.']
+    ['File di origine',        sourcePdfName || ''],
+    ['Pagine totali',          m.pages_total ?? 0],
+    ['Righe estratte',         m.rows_extracted ?? safeRows.length],
+    ['Codici-didascalia',      m.dotazioni_count ?? safeDotazioni.length],
+    ['Righe in CHECK',         m.rows_in_check ?? 0],
+    ['Generato il',            new Date().toISOString()],
+    ['Versione app',           '5.3.0'],
+    ['Versione_Parser',        '5.3.0'],
+    ['Avvertenza',             'Strumento AS-IS. Verificare sempre i dati estratti rispetto al PDF originale.']
   ];
   const wsInfo = XLSX.utils.aoa_to_sheet(infoData);
   wsInfo['!cols'] = [{ wch: 22 }, { wch: 80 }];
   XLSX.utils.book_append_sheet(wb, wsInfo, '00_Info');
 
-  // 2-3. Split rows: Listino (default) + Accessori_Standard (sezione accessori senza prezzo)
-  // SCELTA: il foglio "Accessori_Standard" è SEMPRE creato (anche se vuoto, con solo header)
+  // 2. Listino (righe vere, didascalie già separate dal parser).
+  // 3. Dotazioni standard (codici-didascalia, flag CODICE_DIDASCALIA).
+  // SCELTA: entrambi i fogli sono SEMPRE creati (anche vuoti, con solo header)
   // per garantire una struttura prevedibile dell'Excel di output.
-  const { listino, accessori } = partitionRowsByAccessoriStandard(rows);
-  XLSX.utils.book_append_sheet(wb, buildListinoSheet(listino),  'Listino');
-  XLSX.utils.book_append_sheet(wb, buildListinoSheet(accessori), 'Accessori_Standard');
+  XLSX.utils.book_append_sheet(wb, buildListinoSheet(safeRows),      'Listino');
+  XLSX.utils.book_append_sheet(wb, buildListinoSheet(safeDotazioni), 'Dotazioni standard');
 
   return wb;
 }
