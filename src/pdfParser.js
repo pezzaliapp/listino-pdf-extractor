@@ -437,6 +437,74 @@ export function classifyDidascalie(allRows) {
   return { mainRows, dotazioni };
 }
 
+function _descNorm(s) {
+  return String(s == null ? '' : s).trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Pattern A (coda) — didascalie riconosciute dalla descrizione CONTAMINATA.
+ *
+ * Un codice-didascalia senza prezzo e senza nome proprio può restare nel Listino
+ * perché la sua banda ha catturato la descrizione di un'ALTRA riga (es. 20100135,
+ * etichetta accanto a una foto, che eredita la descrizione della cella di
+ * 20200590). Se la descrizione di una riga NON prezzata coincide con — o è
+ * prefisso/suffisso di — la descrizione di un'altra riga del listino che ne è la
+ * proprietaria (la versione più lunga, oppure una riga prezzata a parità di
+ * testo), allora è contaminazione: il codice va in Dotazioni standard con
+ * CODICE_DIDASCALIA e descrizione VUOTA (non si eredita quella altrui).
+ *
+ * Gira DOPO Pattern B e l'aggregazione, non dentro classifyDidascalie: solo a
+ * valle del merge la descrizione del proprietario è completa e i veri membri di
+ * matrice (es. 20100226) risultano già prezzati, quindi esclusi dal filtro
+ * (candidati = solo righe rimaste senza prezzo).
+ */
+export function reclassifyContaminatedDidascalie(rows, dotazioni) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const owners = safeRows
+    .map(r => ({ r, d: _descNorm(r.descrizione) }))
+    .filter(x => x.d);
+  const kept = [];
+  const moved = [];
+  for (const r of safeRows) {
+    const unpriced = r.prezzo === null || r.prezzo === undefined || r.prezzo === '';
+    const d = _descNorm(r.descrizione);
+    let contaminated = false;
+    // Solo righe senza prezzo con una descrizione dall'aria di nome-prodotto:
+    // i frammenti "(4 pcs)"/"4x" (non sostanziali) e le righe prezzate restano.
+    if (unpriced && d.length >= 8 && isSubstantialDesc(d)) {
+      for (const { r: other, d: od } of owners) {
+        if (other === r || other.codice === r.codice) continue;
+        if (od.length < d.length) continue;                 // il proprietario è ≥ per lunghezza
+        const equal = od === d;
+        const contained = od.startsWith(d) || od.endsWith(d);
+        if (!contained && !equal) continue;
+        if (od.length === d.length) {
+          // stessa lunghezza: proprietario chiaro solo se l'altra è prezzata
+          const otherPriced = !(other.prezzo === null || other.prezzo === undefined || other.prezzo === '');
+          if (!otherPriced) continue;
+        }
+        contaminated = true;
+        break;
+      }
+    }
+    if (contaminated) {
+      moved.push({
+        codice: r.codice,
+        descrizione: '',
+        prezzo: null,
+        pagina: r.pagina,
+        review_flag: 'CODICE_DIDASCALIA',
+        sezione: r.sezione || ''
+      });
+    } else {
+      kept.push(r);
+    }
+  }
+  const outDotazioni = [...(Array.isArray(dotazioni) ? dotazioni : []), ...moved]
+    .sort((a, b) => String(a.codice).localeCompare(String(b.codice)));
+  return { rows: kept, dotazioni: outDotazioni };
+}
+
 // === pdf.js layer ===
 
 /**
@@ -1420,7 +1488,12 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     }
   }
 
-  const rows = aggregateAcrossPages(groupedRows);
+  const aggregated = aggregateAcrossPages(groupedRows);
+  // Pattern A (coda) — sposta in Dotazioni i codici-didascalia riconoscibili solo
+  // dalla descrizione contaminata (ereditata da un'altra riga), ora che le
+  // descrizioni sono complete e i membri di matrice risultano già prezzati.
+  const { rows, dotazioni: dotazioniFinali } =
+    reclassifyContaminatedDidascalie(aggregated, dotazioni);
   // Guardia Pattern B: nessuna descrizione parziale (minuscola/solo parentesi)
   // esce silenziosamente come buona.
   flagPartialDescriptions(rows);
@@ -1428,18 +1501,18 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
 
   onLog(`Pagine totali: ${pages_total} (con testo: ${pages_with_text}, solo immagine: ${pages_image_only}).`);
   onLog(`Righe estratte: ${rows.length}.`);
-  if (dotazioni.length) onLog(`Codici-didascalia (Dotazioni standard): ${dotazioni.length}.`);
+  if (dotazioniFinali.length) onLog(`Codici-didascalia (Dotazioni standard): ${dotazioniFinali.length}.`);
   if (rows_in_check) onLog(`Righe in CHECK: ${rows_in_check}.`);
 
   return {
     rows,
-    dotazioni,
+    dotazioni: dotazioniFinali,
     meta: {
       pages_total,
       pages_with_text,
       pages_image_only,
       rows_extracted: rows.length,
-      dotazioni_count: dotazioni.length,
+      dotazioni_count: dotazioniFinali.length,
       rows_in_check
     }
   };

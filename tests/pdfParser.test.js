@@ -11,7 +11,8 @@ import {
   detectPageTitle, findSectionMarkers, assignSectionToRow,
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
-  stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation
+  stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation,
+  reclassifyContaminatedDidascalie
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1335,4 +1336,62 @@ test('mergeMatrixGroups: la descrizione di gruppo è ripulita dalle note quantit
   assert.doesNotMatch(out[0].descrizione, /\(15 pcs\)/);
   assert.match(out[0].descrizione, /Gruppo esterno di gonfiaggio/);
   assert.match(out[0].descrizione, /manometro pressione/);
+});
+
+// === Intervento 3-bis — didascalia con descrizione contaminata → Dotazioni ===
+
+test('reclassifyContaminatedDidascalie: desc di una riga senza prezzo = prefisso di un\'altra riga → Dotazioni', () => {
+  // Come 20100135: etichetta senza prezzo la cui descrizione è la stessa (più
+  // corta) di quella della riga proprietaria 20200590.
+  const rows = [
+    { codice: '90000030', descrizione: 'Gruppo esterno di gonfiaggio tubeless + pedale gonfiaggio', prezzo: null, pagina: '29', review_flag: 'PREZZO_MANCANTE', sezione: 'S1' },
+    { codice: '90000031', descrizione: 'Gruppo esterno di gonfiaggio tubeless + pedale gonfiaggio e manometro', prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE;DESCRIZIONE_GRUPPO', sezione: 'S1' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  // il proprietario (più lungo) resta nel Listino
+  assert.deepEqual(kept.map(r => r.codice), ['90000031']);
+  // la didascalia va in Dotazioni con descrizione VUOTA
+  const d = dotazioni.find(x => x.codice === '90000030');
+  assert.ok(d, 'la didascalia contaminata deve essere in Dotazioni');
+  assert.equal(d.descrizione, '');
+  assert.equal(d.review_flag, 'CODICE_DIDASCALIA');
+  assert.equal(d.pagina, '29');
+});
+
+test('reclassifyContaminatedDidascalie: NON tocca una riga prezzata (anche se desc coincide)', () => {
+  const rows = [
+    { codice: '90000032', descrizione: 'Dispositivo combinato', prezzo: 100, pagina: '34', review_flag: '', sezione: 'S1' },
+    { codice: '90000033', descrizione: 'Dispositivo combinato completo', prezzo: 200, pagina: '34', review_flag: '', sezione: 'S1' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  assert.equal(kept.length, 2);       // entrambe prezzate → nessuno spostamento
+  assert.equal(dotazioni.length, 0);
+});
+
+test('reclassifyContaminatedDidascalie: NON tocca frammenti non-sostanziali né descrizioni isolate', () => {
+  const rows = [
+    { codice: '90000034', descrizione: '(4 pcs)', prezzo: null, pagina: '46', review_flag: 'PREZZO_MANCANTE;DESC_PARZIALE', sezione: 'S2' },
+    { codice: '90000035', descrizione: 'Articolo unico senza gemelli', prezzo: null, pagina: '50', review_flag: 'PREZZO_MANCANTE', sezione: 'S3' },
+    { codice: '90000036', descrizione: 'Prodotto prezzato distinto', prezzo: 90, pagina: '50', review_flag: '', sezione: 'S3' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  assert.equal(kept.length, 3);       // niente prefisso/suffisso condiviso → invariato
+  assert.equal(dotazioni.length, 0);
+});
+
+test('reclassifyContaminatedDidascalie: match anche come SUFFISSO', () => {
+  // Candidato sostanziale (iniziale maiuscola) che è il SUFFISSO della riga
+  // proprietaria più lunga.
+  const rows = [
+    { codice: '90000037', descrizione: 'Combinato per il montaggio dei pneumatici', prezzo: null, pagina: '34', review_flag: 'PREZZO_MANCANTE', sezione: 'S1' },
+    { codice: '90000038', descrizione: 'Dispositivo Combinato per il montaggio dei pneumatici', prezzo: 500, pagina: '34', review_flag: '', sezione: 'S1' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  assert.deepEqual(kept.map(r => r.codice), ['90000038']);
+  assert.equal(dotazioni.find(x => x.codice === '90000037').descrizione, '');
+});
+
+test('reclassifyContaminatedDidascalie: input difensivo', () => {
+  assert.deepEqual(reclassifyContaminatedDidascalie([], []), { rows: [], dotazioni: [] });
+  assert.deepEqual(reclassifyContaminatedDidascalie(null, null), { rows: [], dotazioni: [] });
 });
