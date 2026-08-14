@@ -11,7 +11,8 @@ import {
   detectPageTitle, findSectionMarkers, assignSectionToRow,
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
-  stripOptionalBanner
+  stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation,
+  reclassifyContaminatedDidascalie
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1200,4 +1201,197 @@ test('emitRowFromBand: il banner OPTIONAL non diventa descrizione', () => {
   ];
   const row = emitRowFromBand(anchor, items, cols, 8);
   assert.equal(row.descrizione, '');
+});
+
+// === Intervento 1 — box ACCESSORI STANDARD uniforme (rumore di layout) ===
+
+test('stripLayoutNoise: rimuove marker sezione, note quantità e dimensione', () => {
+  assert.equal(stripLayoutNoise('OPTIONAL'), '');
+  assert.equal(stripLayoutNoise('Ø mm 145'), '');
+  assert.equal(stripLayoutNoise('Ø mm 58 Ø mm 74 Ø mm 120'), '');
+  assert.equal(stripLayoutNoise('(3 pcs)'), '');
+  assert.equal(stripLayoutNoise('OPTIONAL (3 pcs)'), '');
+  // una vera descrizione sopravvive
+  assert.equal(stripLayoutNoise('Gruppo esterno per gonfiaggio'), 'Gruppo esterno per gonfiaggio');
+  assert.equal(stripLayoutNoise('Pinza OPTIONAL'), 'Pinza');
+});
+
+test('classifyDidascalie: frammento di layout maiuscolo NON salva il codice dal box → Dotazioni', () => {
+  // Come pag.24-25: il codice sta nel box ACCESSORI STANDARD (desc vuota) e su
+  // una scheda ripetuta ha raccolto un frammento maiuscolo di layout
+  // ("OPTIONAL", "Ø mm 145"): non è un nome-prodotto, l'intero box va in Dotazioni.
+  const rows = [
+    { codice: '90000010', descrizione: '',          prezzo: null, pagina: '24', review_flag: 'PREZZO_MANCANTE', sezione: 'S1 > ACCESSORI STANDARD' },
+    { codice: '90000010', descrizione: 'OPTIONAL',   prezzo: null, pagina: '25', review_flag: 'PREZZO_MANCANTE', sezione: 'S2' },
+    { codice: '90000011', descrizione: '',           prezzo: null, pagina: '24', review_flag: 'PREZZO_MANCANTE', sezione: 'S1 > ACCESSORI STANDARD' },
+    { codice: '90000011', descrizione: 'Ø mm 145',   prezzo: null, pagina: '25', review_flag: 'PREZZO_MANCANTE', sezione: 'S2' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(mainRows.length, 0);                 // niente più frammenti nel Listino
+  assert.deepEqual(dotazioni.map(d => d.codice).sort(), ['90000010', '90000011']);
+});
+
+test('classifyDidascalie: una vera descrizione-prodotto continua a salvare il codice (nessuna regressione)', () => {
+  // Un nome-prodotto reale su una pagina matrice NON deve finire in Dotazioni:
+  // resta nel Listino (poi completato da Pattern B).
+  const rows = [
+    { codice: '90000012', descrizione: '',                          prezzo: null, pagina: '27', review_flag: 'PREZZO_MANCANTE', sezione: 'S1 > ACCESSORI STANDARD' },
+    { codice: '90000012', descrizione: 'Gruppo esterno di gonfiaggio', prezzo: null, pagina: '29', review_flag: 'PREZZO_MANCANTE', sezione: 'S3' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);
+  assert.equal(mainRows.length, 1);
+  assert.equal(mainRows[0].pagina, '29');
+});
+
+// === Intervento 2 — filtro sezione-appendice (DIMENSIONI IMBALLI) ===
+
+test('isExcludedSection: riconosce la sezione tabella imballi, non le sezioni normali', () => {
+  assert.equal(isExcludedSection('DIMENSIONI IMBALLI'), true);
+  assert.equal(isExcludedSection('S1 > DIMENSIONI IMBALLI'), true);
+  assert.equal(isExcludedSection('dimensioni  imballi'), true);   // case/spazi
+  assert.equal(isExcludedSection('S1 > ACCESSORI STANDARD'), false);
+  assert.equal(isExcludedSection('ACCESSORI SMONTAGOMME'), false);
+  assert.equal(isExcludedSection(''), false);
+  assert.equal(isExcludedSection(null), false);
+});
+
+test('isExcludedSection: una riga con l\'intera tabella imballi in descrizione è filtrabile', () => {
+  // Fixture sintetica (dati fittizi): l'unica "riga" della pagina appendice
+  // raccoglie tutta la tabella pesi/misure; la sezione basta a filtrarla.
+  const row = {
+    codice: '90000020',
+    descrizione: 'LxPxH (cm) Cassa in legno 50 65 110x60x50 A vista su pallet 80 90 96x69x160',
+    prezzo: null,
+    pagina: '90',
+    review_flag: 'PREZZO_MANCANTE',
+    sezione: 'DIMENSIONI IMBALLI'
+  };
+  assert.equal(isExcludedSection(row.sezione), true);
+});
+
+// === Intervento 3 — coppie celle-condivise mancate (continuazioni/vuote/note) ===
+
+test('isShortUpperContinuation: solo una parola MAIUSCOLA breve', () => {
+  assert.equal(isShortUpperContinuation('STANDARD'), true);
+  assert.equal(isShortUpperContinuation('CE'), true);
+  assert.equal(isShortUpperContinuation('Kit'), false);          // non tutta maiuscola
+  assert.equal(isShortUpperContinuation('KIT SMART APP'), false); // multi-parola
+  assert.equal(isShortUpperContinuation('ruote'), false);
+  assert.equal(isShortUpperContinuation(''), false);
+});
+
+test('mergeMatrixGroups: sigla-suffisso MAIUSCOLA ("STANDARD") continua la cella del codice sopra', () => {
+  // Come p.37: 20100319 "Pistoletta di gonfiaggio" @80, sotto un codice con la
+  // sola sigla "STANDARD" a prezzo nullo → stessa cella, stesso prezzo.
+  const rows = [
+    { codice: 'K1', descrizione: 'Pistoletta di gonfiaggio', prezzo: 80,   pagina: '37', review_flag: '',                sezione: 'MATR', yAnchor: 540 },
+    { codice: 'K2', descrizione: 'STANDARD',                  prezzo: null, pagina: '37', review_flag: 'PREZZO_MANCANTE', sezione: 'MATR', yAnchor: 571 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[1].descrizione, 'Pistoletta di gonfiaggio STANDARD');
+  assert.equal(out[1].prezzo, 80);
+  assert.match(out[1].review_flag, /PREZZO_GRUPPO/);
+  assert.doesNotMatch(out[1].review_flag, /PREZZO_MANCANTE/);
+  assert.equal(out[0].descrizione, 'Pistoletta di gonfiaggio STANDARD'); // capofila completata
+});
+
+test('mergeMatrixGroups: riga vuota a prezzo NULLO sotto una capofila con prezzo unico → cella condivisa', () => {
+  // Come p.43: 20100216 "Set di 3 protezioni..." @90, sotto un codice vuoto e
+  // senza prezzo (20100184) che appartiene alla stessa cella.
+  const rows = [
+    { codice: 'L1', descrizione: 'Set di 3 protezioni paletta stallonatore', prezzo: 90,   pagina: '43', review_flag: '',                sezione: 'MATR', yAnchor: 170 },
+    { codice: 'L2', descrizione: '',                                          prezzo: null, pagina: '43', review_flag: 'PREZZO_MANCANTE', sezione: 'MATR', yAnchor: 210 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[1].descrizione, 'Set di 3 protezioni paletta stallonatore');
+  assert.equal(out[1].prezzo, 90);
+  assert.match(out[1].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.match(out[1].review_flag, /PREZZO_GRUPPO/);
+});
+
+test('mergeMatrixGroups: guardia p.54 invariata — prezzo proprio distinto NON si fonde', () => {
+  // Anche con le nuove condizioni, una riga vuota/breve con un prezzo PROPRIO
+  // diverso da quello del gruppo resta un prodotto a sé (nessun merge).
+  const rows = [
+    { codice: 'M1', descrizione: '', prezzo: 800,  pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 208 },
+    { codice: 'M2', descrizione: '', prezzo: 1300, pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 231 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[0].prezzo, 800);
+  assert.equal(out[1].prezzo, 1300);
+  assert.equal(out[1].descrizione, '');
+  assert.doesNotMatch(out[1].review_flag || '', /GRUPPO/);
+});
+
+test('mergeMatrixGroups: la descrizione di gruppo è ripulita dalle note quantità', () => {
+  // Come p.31 (20200590): un frammento porta "(15 pcs)" dentro la cella;
+  // la descrizione ricomposta non deve contenerlo.
+  const rows = [
+    { codice: 'N1', descrizione: 'Gruppo esterno di gonfiaggio',       prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 547 },
+    { codice: 'N2', descrizione: '(15 pcs) e manometro pressione.',    prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 551 },
+    { codice: 'N3', descrizione: 'tubeless + pedale gonfiaggio',       prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 555 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.doesNotMatch(out[0].descrizione, /\(15 pcs\)/);
+  assert.match(out[0].descrizione, /Gruppo esterno di gonfiaggio/);
+  assert.match(out[0].descrizione, /manometro pressione/);
+});
+
+// === Intervento 3-bis — didascalia con descrizione contaminata → Dotazioni ===
+
+test('reclassifyContaminatedDidascalie: desc di una riga senza prezzo = prefisso di un\'altra riga → Dotazioni', () => {
+  // Come 20100135: etichetta senza prezzo la cui descrizione è la stessa (più
+  // corta) di quella della riga proprietaria 20200590.
+  const rows = [
+    { codice: '90000030', descrizione: 'Gruppo esterno di gonfiaggio tubeless + pedale gonfiaggio', prezzo: null, pagina: '29', review_flag: 'PREZZO_MANCANTE', sezione: 'S1' },
+    { codice: '90000031', descrizione: 'Gruppo esterno di gonfiaggio tubeless + pedale gonfiaggio e manometro', prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE;DESCRIZIONE_GRUPPO', sezione: 'S1' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  // il proprietario (più lungo) resta nel Listino
+  assert.deepEqual(kept.map(r => r.codice), ['90000031']);
+  // la didascalia va in Dotazioni con descrizione VUOTA
+  const d = dotazioni.find(x => x.codice === '90000030');
+  assert.ok(d, 'la didascalia contaminata deve essere in Dotazioni');
+  assert.equal(d.descrizione, '');
+  assert.equal(d.review_flag, 'CODICE_DIDASCALIA');
+  assert.equal(d.pagina, '29');
+});
+
+test('reclassifyContaminatedDidascalie: NON tocca una riga prezzata (anche se desc coincide)', () => {
+  const rows = [
+    { codice: '90000032', descrizione: 'Dispositivo combinato', prezzo: 100, pagina: '34', review_flag: '', sezione: 'S1' },
+    { codice: '90000033', descrizione: 'Dispositivo combinato completo', prezzo: 200, pagina: '34', review_flag: '', sezione: 'S1' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  assert.equal(kept.length, 2);       // entrambe prezzate → nessuno spostamento
+  assert.equal(dotazioni.length, 0);
+});
+
+test('reclassifyContaminatedDidascalie: NON tocca frammenti non-sostanziali né descrizioni isolate', () => {
+  const rows = [
+    { codice: '90000034', descrizione: '(4 pcs)', prezzo: null, pagina: '46', review_flag: 'PREZZO_MANCANTE;DESC_PARZIALE', sezione: 'S2' },
+    { codice: '90000035', descrizione: 'Articolo unico senza gemelli', prezzo: null, pagina: '50', review_flag: 'PREZZO_MANCANTE', sezione: 'S3' },
+    { codice: '90000036', descrizione: 'Prodotto prezzato distinto', prezzo: 90, pagina: '50', review_flag: '', sezione: 'S3' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  assert.equal(kept.length, 3);       // niente prefisso/suffisso condiviso → invariato
+  assert.equal(dotazioni.length, 0);
+});
+
+test('reclassifyContaminatedDidascalie: match anche come SUFFISSO', () => {
+  // Candidato sostanziale (iniziale maiuscola) che è il SUFFISSO della riga
+  // proprietaria più lunga.
+  const rows = [
+    { codice: '90000037', descrizione: 'Combinato per il montaggio dei pneumatici', prezzo: null, pagina: '34', review_flag: 'PREZZO_MANCANTE', sezione: 'S1' },
+    { codice: '90000038', descrizione: 'Dispositivo Combinato per il montaggio dei pneumatici', prezzo: 500, pagina: '34', review_flag: '', sezione: 'S1' }
+  ];
+  const { rows: kept, dotazioni } = reclassifyContaminatedDidascalie(rows, []);
+  assert.deepEqual(kept.map(r => r.codice), ['90000038']);
+  assert.equal(dotazioni.find(x => x.codice === '90000037').descrizione, '');
+});
+
+test('reclassifyContaminatedDidascalie: input difensivo', () => {
+  assert.deepEqual(reclassifyContaminatedDidascalie([], []), { rows: [], dotazioni: [] });
+  assert.deepEqual(reclassifyContaminatedDidascalie(null, null), { rows: [], dotazioni: [] });
 });

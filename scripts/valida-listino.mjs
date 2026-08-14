@@ -3,16 +3,21 @@
 // (riusa src/pdfParser.js) e stampa i contatori diagnostici.
 //
 // USO:  node scripts/valida-listino.mjs <path-al-pdf>
+//       node scripts/valida-listino.mjs <path-al-pdf> --dump-page N
 //
 // Il path del PDF è OBBLIGATORIO e va passato come argomento: lo script non
 // contiene path personali né dati del listino (vedi CLAUDE.md). Nessun file
 // del listino viene scritto o copiato: si legge soltanto.
+//
+// --dump-page N: stampa i text item grezzi della pagina N (x, y, width, str)
+//   ordinati per y poi x, per ispezionare la geometria delle tabelle. I valori
+//   di prezzo sono MASCHERATI come "#.###,##" (mai prezzi reali a schermo).
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { extractFromPdfDocument } from '../src/pdfParser.js';
+import { extractFromPdfDocument, normalizePdfjsItem } from '../src/pdfParser.js';
 
 // pdfjs-dist legacy build: gira in Node senza worker/canvas.
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -24,11 +29,55 @@ function isVuota(desc) {
   return !desc || !String(desc).trim();
 }
 
-async function main() {
-  const pdfPath = process.argv[2];
-  if (!pdfPath) {
-    console.error('USO: node scripts/valida-listino.mjs <path-al-pdf>');
+// Maschera i token che hanno la forma di un prezzo italiano (con o senza punto
+// migliaia, con o senza simbolo €): mai un valore di prezzo reale a schermo.
+const PRICE_RE = /^\d{1,3}(?:\.\d{3})*,\d{2}(?:\s*€)?$|^\d{4,9},\d{2}(?:\s*€)?$/;
+function maskPrice(s) {
+  return PRICE_RE.test(String(s).trim()) ? '#.###,##' : s;
+}
+
+async function dumpPage(pdfPath, pageNum) {
+  const data = new Uint8Array(await readFile(pdfPath));
+  const pdf = await pdfjsLib.getDocument({ data, useSystemFonts: true }).promise;
+  if (!Number.isInteger(pageNum) || pageNum < 1 || pageNum > pdf.numPages) {
+    console.error(`Pagina fuori range (1..${pdf.numPages}).`);
     process.exit(2);
+  }
+  const page = await pdf.getPage(pageNum);
+  const tc = await page.getTextContent();
+  const vp = page.getViewport({ scale: 1 });
+  const items = (tc.items || [])
+    .map(it => normalizePdfjsItem(it, vp.height))
+    .filter(it => it && String(it.str || '').trim())
+    // y = coord display-top (piccolo = più in alto); ordina per y poi per x.
+    .sort((a, b) => (Math.round(a.top) - Math.round(b.top)) || (a.x0 - b.x0));
+
+  console.log('='.repeat(72));
+  console.log(`DUMP PAGINA ${pageNum}  (${path.basename(pdfPath)})  — prezzi mascherati`);
+  console.log(`pageWidth=${Math.round(vp.width)} pageHeight=${Math.round(vp.height)}  item=${items.length}`);
+  console.log('  y     x     w     str');
+  console.log('-'.repeat(72));
+  for (const it of items) {
+    const y = String(Math.round(it.top)).padStart(5);
+    const x = String(Math.round(it.x0)).padStart(5);
+    const w = String(Math.round(it.x1 - it.x0)).padStart(4);
+    console.log(`${y} ${x} ${w}   ${maskPrice(it.str)}`);
+  }
+  console.log('='.repeat(72));
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const pdfPath = args.find(a => !a.startsWith('--') &&
+    args[args.indexOf(a) - 1] !== '--dump-page');
+  if (!pdfPath) {
+    console.error('USO: node scripts/valida-listino.mjs <path-al-pdf> [--dump-page N]');
+    process.exit(2);
+  }
+  const di = args.indexOf('--dump-page');
+  if (di >= 0) {
+    await dumpPage(pdfPath, Number(args[di + 1]));
+    return;
   }
 
   const data = new Uint8Array(await readFile(pdfPath));

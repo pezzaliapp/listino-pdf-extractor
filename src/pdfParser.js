@@ -323,6 +323,21 @@ export function isSubstantialDesc(desc) {
   return ch === ch.toUpperCase() && ch !== ch.toLowerCase();
 }
 
+/** Rimuove da una descrizione il "rumore di layout" che cola sulle didascalie
+ *  dei box ACCESSORI STANDARD: la parola-marker di sezione ("OPTIONAL",
+ *  "ACCESSORI STANDARD"…), le note-quantità "(3 pcs)" e le note-dimensione
+ *  "Ø mm 145". Serve a valutare se resta una VERA descrizione: un frammento
+ *  come "OPTIONAL" o "Ø mm 58 Ø mm 74" inizia con una maiuscola ma non è un
+ *  nome-prodotto, quindi non deve salvare il codice dalla sezione Dotazioni. */
+export function stripLayoutNoise(desc) {
+  return String(desc == null ? '' : desc)
+    .replace(/Ø\s*mm\s*\d+/gi, ' ')                            // note dimensione (Ø non-ASCII: niente \b)
+    .replace(/\(\s*\d+\s*pcs?\s*\)/gi, ' ')                    // note quantità "(3 pcs)"
+    .replace(/\b(?:ACCESSORI\s+STANDARD|ACCESSORI\s+OPTIONAL|OPTIONAL\s+CONSIGLIATI|OPTIONAL)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Pattern A — separa le occorrenze-didascalia (righe pre-aggregazione, ognuna
  * su una sola pagina) dalle vere righe di listino.
@@ -371,7 +386,13 @@ export function classifyDidascalie(allRows) {
   for (const [code, occs] of byCode.entries()) {
     const neverPriced = occs.every(_isNoPrice);
     if (!neverPriced) continue;
-    const hasSubstantial = occs.some(o => isSubstantialDesc(o.descrizione));
+    // Una descrizione "salva" il codice dalla sezione Dotazioni solo se è un
+    // vero nome-prodotto: i frammenti di layout (marker di sezione, note
+    // quantità/dimensione) che colano sulle didascalie del box vengono tolti
+    // prima del controllo, così l'INTERO box ACCESSORI STANDARD va in Dotazioni
+    // anche quando su una scheda ripetuta un codice ha raccolto "OPTIONAL" o
+    // "Ø mm 145".
+    const hasSubstantial = occs.some(o => isSubstantialDesc(stripLayoutNoise(o.descrizione)));
     if (hasSubstantial) continue;
     const inAccStandard = occs.some(o => ACCESSORI_STD_RE.test(String(o.sezione || '')));
     const allDegenerate = occs.every(o => isDegenerateDesc(o.descrizione));
@@ -414,6 +435,74 @@ export function classifyDidascalie(allRows) {
   }
   dotazioni.sort((a, b) => a.codice.localeCompare(b.codice));
   return { mainRows, dotazioni };
+}
+
+function _descNorm(s) {
+  return String(s == null ? '' : s).trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Pattern A (coda) — didascalie riconosciute dalla descrizione CONTAMINATA.
+ *
+ * Un codice-didascalia senza prezzo e senza nome proprio può restare nel Listino
+ * perché la sua banda ha catturato la descrizione di un'ALTRA riga (es. 20100135,
+ * etichetta accanto a una foto, che eredita la descrizione della cella di
+ * 20200590). Se la descrizione di una riga NON prezzata coincide con — o è
+ * prefisso/suffisso di — la descrizione di un'altra riga del listino che ne è la
+ * proprietaria (la versione più lunga, oppure una riga prezzata a parità di
+ * testo), allora è contaminazione: il codice va in Dotazioni standard con
+ * CODICE_DIDASCALIA e descrizione VUOTA (non si eredita quella altrui).
+ *
+ * Gira DOPO Pattern B e l'aggregazione, non dentro classifyDidascalie: solo a
+ * valle del merge la descrizione del proprietario è completa e i veri membri di
+ * matrice (es. 20100226) risultano già prezzati, quindi esclusi dal filtro
+ * (candidati = solo righe rimaste senza prezzo).
+ */
+export function reclassifyContaminatedDidascalie(rows, dotazioni) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const owners = safeRows
+    .map(r => ({ r, d: _descNorm(r.descrizione) }))
+    .filter(x => x.d);
+  const kept = [];
+  const moved = [];
+  for (const r of safeRows) {
+    const unpriced = r.prezzo === null || r.prezzo === undefined || r.prezzo === '';
+    const d = _descNorm(r.descrizione);
+    let contaminated = false;
+    // Solo righe senza prezzo con una descrizione dall'aria di nome-prodotto:
+    // i frammenti "(4 pcs)"/"4x" (non sostanziali) e le righe prezzate restano.
+    if (unpriced && d.length >= 8 && isSubstantialDesc(d)) {
+      for (const { r: other, d: od } of owners) {
+        if (other === r || other.codice === r.codice) continue;
+        if (od.length < d.length) continue;                 // il proprietario è ≥ per lunghezza
+        const equal = od === d;
+        const contained = od.startsWith(d) || od.endsWith(d);
+        if (!contained && !equal) continue;
+        if (od.length === d.length) {
+          // stessa lunghezza: proprietario chiaro solo se l'altra è prezzata
+          const otherPriced = !(other.prezzo === null || other.prezzo === undefined || other.prezzo === '');
+          if (!otherPriced) continue;
+        }
+        contaminated = true;
+        break;
+      }
+    }
+    if (contaminated) {
+      moved.push({
+        codice: r.codice,
+        descrizione: '',
+        prezzo: null,
+        pagina: r.pagina,
+        review_flag: 'CODICE_DIDASCALIA',
+        sezione: r.sezione || ''
+      });
+    } else {
+      kept.push(r);
+    }
+  }
+  const outDotazioni = [...(Array.isArray(dotazioni) ? dotazioni : []), ...moved]
+    .sort((a, b) => String(a.codice).localeCompare(String(b.codice)));
+  return { rows: kept, dotazioni: outDotazioni };
 }
 
 // === pdf.js layer ===
@@ -820,6 +909,20 @@ export function stripOptionalBanner(desc) {
 }
 
 /**
+ * Sezioni-appendice che NON sono listino: tabelle riassuntive (pesi e misure
+ * degli imballi) senza codice/prezzo per riga. L'unica "riga" che il parser vi
+ * aggancia raccoglie l'intera tabella come descrizione (es. la sezione
+ * "DIMENSIONI IMBALLI"): va filtrata come un banner, non emessa nel Listino.
+ */
+export const EXCLUDED_SECTION_RE = /DIMENSIONI\s+IMBALL/i;
+
+/** True se la sezione della riga appartiene a un'appendice tabellare da NON
+ *  emettere come riga di listino. */
+export function isExcludedSection(sezione) {
+  return EXCLUDED_SECTION_RE.test(String(sezione == null ? '' : sezione));
+}
+
+/**
  * M1 — Costruisce una riga prodotto dalla banda di un anchor.
  *  - descrizione: concatenazione (top↑, x0↑) degli item in fascia 'descrizione'
  *  - prezzo: primo prezzo valido in fascia 'prezzo' (parsePriceString)
@@ -1140,6 +1243,15 @@ export function isFragmentDesc(d) {
   return ch === ch.toLowerCase() && ch !== ch.toUpperCase();
 }
 
+/** Una singola parola tutta MAIUSCOLA e breve ("STANDARD", "CE", "BAT") è una
+ *  sigla-suffisso di variante che continua la cella del codice sopra, non un
+ *  nome-prodotto a sé: isFragmentDesc non la cattura (inizia in maiuscola), ma
+ *  in una cella condivisa va agganciata al gruppo. Il limite a una parola breve
+ *  evita di risucchiare una vera capofila multi-parola. */
+export function isShortUpperContinuation(d) {
+  return /^[A-ZÀ-Ý]{2,12}$/.test(String(d == null ? '' : d).trim());
+}
+
 function _flagList(row) {
   return new Set(String(row.review_flag || '').split(';').map(s => s.trim()).filter(Boolean));
 }
@@ -1193,11 +1305,16 @@ export function mergeMatrixGroups(rows) {
       let joins = false;
       if (isFragmentDesc(cur.descrizione)) {
         joins = true;
-      } else if (_isEmptyDesc(cur.descrizione)) {
-        // vuota: entra solo se condivide un prezzo già presente nel gruppo
-        // (stessa cella, stesso importo). Le vuote a prezzo nullo restano a
-        // mergeMultiCodeRows, che ha guardie più strette (evita p.54/p.43).
-        joins = cur.prezzo != null && groupPrices.length === 1 && cur.prezzo === groupPrices[0];
+      } else if (_isEmptyDesc(cur.descrizione) || isShortUpperContinuation(cur.descrizione)) {
+        // Codice quasi-nudo — riga vuota, oppure una sigla-suffisso maiuscola
+        // ("STANDARD") che continua la cella del codice sopra. Entra se il gruppo
+        // ha UN SOLO prezzo e cur non porta un prezzo PROPRIO diverso: una riga
+        // con un prezzo proprio e distinto è un prodotto a sé e NON si fonde
+        // (guardia p.54, invariata). Un prezzo nullo o uguale a quello del
+        // gruppo indica invece la stessa cella condivisa (p.37 20100404, p.43
+        // 20100184).
+        joins = groupPrices.length === 1 &&
+                (cur.prezzo == null || cur.prezzo === groupPrices[0]);
       }
       if (!joins) break;
       group.push(cur);
@@ -1210,11 +1327,14 @@ export function mergeMatrixGroups(rows) {
 }
 
 function _applyMatrixGroup(group) {
-  const fullDesc = group
+  // La descrizione ricomposta viene ripulita dalle note di layout (quantità
+  // "(15 pcs)", dimensioni "Ø mm N") che colano dentro la cella condivisa e
+  // contaminerebbero il gruppo (es. p.31 20200590).
+  const fullDesc = stripLayoutNoise(group
     .map(g => String(g.descrizione || '').trim())
     .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
+    .join(' '))
+    .replace(/\s+([,.;:])/g, '$1')
     .trim();
   const prices = _distinctNonNull(group.map(g => g.prezzo));
   const singlePrice = prices.length === 1 ? prices[0] : null;
@@ -1340,12 +1460,16 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     }
   }
 
+  // Filtro sezioni-appendice (es. "DIMENSIONI IMBALLI"): non sono listino, la
+  // riga agganciata è solo l'intera tabella pesi/misure incollata in descrizione.
+  const listinoRows = allRows.filter(r => !isExcludedSection(r.sezione));
+
   // Pattern A — separa le occorrenze-didascalia (box ACCESSORI STANDARD) dalle
   // vere righe di listino PRIMA di Pattern B e dell'aggregazione: così un codice
   // come 21100240 (didascalia su molte pagine, prezzato solo a pag.18) aggrega
   // la sola occorrenza reale, e i badge (es. 41100028 "( )") non finiscono per
   // sbaglio dentro un gruppo-matrice che ne "gonfierebbe" la descrizione.
-  const { mainRows, dotazioni } = classifyDidascalie(allRows);
+  const { mainRows, dotazioni } = classifyDidascalie(listinoRows);
 
   // Pattern B — celle descrizione/prezzo condivise da un gruppo di codici,
   // applicato per pagina sui superstiti (le righe di ogni pagina sono già in
@@ -1364,7 +1488,12 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     }
   }
 
-  const rows = aggregateAcrossPages(groupedRows);
+  const aggregated = aggregateAcrossPages(groupedRows);
+  // Pattern A (coda) — sposta in Dotazioni i codici-didascalia riconoscibili solo
+  // dalla descrizione contaminata (ereditata da un'altra riga), ora che le
+  // descrizioni sono complete e i membri di matrice risultano già prezzati.
+  const { rows, dotazioni: dotazioniFinali } =
+    reclassifyContaminatedDidascalie(aggregated, dotazioni);
   // Guardia Pattern B: nessuna descrizione parziale (minuscola/solo parentesi)
   // esce silenziosamente come buona.
   flagPartialDescriptions(rows);
@@ -1372,18 +1501,18 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
 
   onLog(`Pagine totali: ${pages_total} (con testo: ${pages_with_text}, solo immagine: ${pages_image_only}).`);
   onLog(`Righe estratte: ${rows.length}.`);
-  if (dotazioni.length) onLog(`Codici-didascalia (Dotazioni standard): ${dotazioni.length}.`);
+  if (dotazioniFinali.length) onLog(`Codici-didascalia (Dotazioni standard): ${dotazioniFinali.length}.`);
   if (rows_in_check) onLog(`Righe in CHECK: ${rows_in_check}.`);
 
   return {
     rows,
-    dotazioni,
+    dotazioni: dotazioniFinali,
     meta: {
       pages_total,
       pages_with_text,
       pages_image_only,
       rows_extracted: rows.length,
-      dotazioni_count: dotazioni.length,
+      dotazioni_count: dotazioniFinali.length,
       rows_in_check
     }
   };
