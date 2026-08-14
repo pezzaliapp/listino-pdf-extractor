@@ -12,7 +12,7 @@ import {
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
   stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation,
-  reclassifyContaminatedDidascalie
+  reclassifyContaminatedDidascalie, propagateFloatingDescriptions
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1394,4 +1394,74 @@ test('reclassifyContaminatedDidascalie: match anche come SUFFISSO', () => {
 test('reclassifyContaminatedDidascalie: input difensivo', () => {
   assert.deepEqual(reclassifyContaminatedDidascalie([], []), { rows: [], dotazioni: [] });
   assert.deepEqual(reclassifyContaminatedDidascalie(null, null), { rows: [], dotazioni: [] });
+});
+
+// === Disaccoppiamento — descrizione condivisa "a cavallo", prezzo per riga ===
+
+test('propagateFloatingDescriptions: gruppo a 2 con prezzi distinti → desc propagata, prezzi intatti', () => {
+  // Come p.54 20100112/20100362: cella-descrizione unica, un prezzo per riga.
+  const rows = [
+    { codice: 'A1', descrizione: 'Kit radiocomando', prezzo: 3100, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 607, _descGalleggiante: true },
+    { codice: 'A2', descrizione: '',                 prezzo: 5800, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 635 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, 'Kit radiocomando');
+  assert.match(out[1].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.equal(out[0].prezzo, 3100);   // prezzi PROPRI intatti (guardia-prezzo)
+  assert.equal(out[1].prezzo, 5800);
+});
+
+test('propagateFloatingDescriptions: gruppo a 5 con prezzo per riga → tutti descritti, nessun prezzo toccato', () => {
+  const rows = [
+    { codice: 'B1', descrizione: '',               prezzo: 100, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 208 },
+    { codice: 'B2', descrizione: '',               prezzo: 200, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 231 },
+    { codice: 'B3', descrizione: 'Rullo Tubeless', prezzo: 300, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 253, _descGalleggiante: true },
+    { codice: 'B4', descrizione: '',               prezzo: 400, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 276 },
+    { codice: 'B5', descrizione: '',               prezzo: 500, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 299 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.ok(out.every(r => r.descrizione === 'Rullo Tubeless'));
+  assert.deepEqual(out.map(r => r.prezzo), [100, 200, 300, 400, 500]); // ogni prezzo al suo posto
+  assert.match(out[0].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.doesNotMatch(out[2].review_flag || '', /DESCRIZIONE_GRUPPO/); // capofila
+});
+
+test('propagateFloatingDescriptions: galleria (righe SENZA prezzo) → nessuna propagazione', () => {
+  // Codici-didascalia di una pagina-galleria: nessun prezzo proprio → la logica
+  // non scatta e non si fabbricano descrizioni da testo di layout.
+  const rows = [
+    { codice: 'C1', descrizione: 'OPTIONAL', prezzo: null, pagina: '63', review_flag: 'PREZZO_MANCANTE', sezione: 'S2', yAnchor: 496, _descGalleggiante: true },
+    { codice: 'C2', descrizione: '',         prezzo: null, pagina: '63', review_flag: 'PREZZO_MANCANTE', sezione: 'S2', yAnchor: 508 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, '');            // niente propagazione
+  assert.doesNotMatch(out[1].review_flag || '', /DESCRIZIONE_GRUPPO/);
+});
+
+test('propagateFloatingDescriptions: descrizione NON galleggiante non cola sui vicini', () => {
+  // Una riga con descrizione propria allineata (non _descGalleggiante) non è una
+  // cella condivisa: la riga vuota accanto resta vuota.
+  const rows = [
+    { codice: 'D1', descrizione: 'Prodotto proprio', prezzo: 100, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 200 },
+    { codice: 'D2', descrizione: '',                 prezzo: 200, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 220 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, '');
+});
+
+test('propagateFloatingDescriptions: singleton (nessuna riga vuota accanto) → nessuna propagazione', () => {
+  const rows = [
+    { codice: 'E0', descrizione: 'Sopra', prezzo: 50, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 180 },
+    { codice: 'E1', descrizione: 'Etichetta a cavallo', prezzo: 100, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 200, _descGalleggiante: true },
+    { codice: 'E2', descrizione: 'Sotto', prezzo: 200, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 220 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, 'Etichetta a cavallo'); // invariata
+  assert.doesNotMatch(out[0].review_flag || '', /DESCRIZIONE_GRUPPO/);
+  assert.doesNotMatch(out[2].review_flag || '', /DESCRIZIONE_GRUPPO/);
+});
+
+test('propagateFloatingDescriptions: input difensivo', () => {
+  assert.deepEqual(propagateFloatingDescriptions([]), []);
+  assert.deepEqual(propagateFloatingDescriptions(null), []);
 });
