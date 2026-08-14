@@ -8,11 +8,14 @@ import {
   collectBandItems, classifyXBand, emitRowFromBand,
   stripIconText, ICON_STRINGS,
   mergeMultiCodeRows,
-  detectPageTitle, findSectionMarkers, assignSectionToRow
+  detectPageTitle, findSectionMarkers, assignSectionToRow,
+  isDegenerateDesc, classifyDidascalie,
+  isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
+  stripOptionalBanner
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
-  assert.equal(parsePriceString('3.940,00'), 3940);
+  assert.equal(parsePriceString('2.750,00'), 2750);
   assert.equal(parsePriceString('880,00'), 880);
   assert.equal(parsePriceString('1.500'), 1500);
   assert.equal(parsePriceString('21.100.057'), null);  // codice travestito
@@ -25,7 +28,7 @@ test('isProductCode', () => {
   assert.equal(isProductCode('21100076'), true);
   assert.equal(isProductCode('00100208'), true);
   assert.equal(isProductCode('123'), false);
-  assert.equal(isProductCode('3.940,00'), false);
+  assert.equal(isProductCode('2.750,00'), false);
 });
 
 test('computeYBucket: ritorna 0.4 * moda dei font del corpo', () => {
@@ -51,7 +54,7 @@ test('computeColumnBands: deriva le 5 fasce dalla moda di codici e prezzi', () =
     { str: '21100357', x0: 100, x1: 130 },
     { str: 'KIT SMART APP', x0: 165, x1: 240 },
     { str: '880,00', x0: 480, x1: 510 },
-    { str: '3.940,00', x0: 480, x1: 510 },
+    { str: '2.750,00', x0: 480, x1: 510 },
     { str: '65,00', x0: 480, x1: 510 }
   ];
   const bands = computeColumnBands(items, 600);
@@ -125,7 +128,7 @@ test('filterVerticalHeaders: tiene caratteri brevi se sotto il primo anchor', ()
 
 test('filterVerticalHeaders: tiene token con length >= 3', () => {
   const items = [
-    { str: 'TOUCH', x0: 380, x1: 415, top: 100 },
+    { str: 'TITOLO', x0: 380, x1: 415, top: 100 },
     { str: '21100070', x0: 100, x1: 140, top: 215 }
   ];
   const out = filterVerticalHeaders(items, 200);
@@ -416,18 +419,18 @@ test('ICON_STRINGS contiene le icone documentate dalla SPEC', () => {
 test('stripIconText: nominale — rimuove "AUTO" se arriva come 4 char singoli', () => {
   // Caso §P4: AUTO renderizzato come 4 char singoli sotto la descrizione.
   const items = [
-    { str: 'MEC',   x0: 165, x1: 195, top: 215 },
+    { str: 'MODELLO-X', x0: 165, x1: 195, top: 215 },
     { str: 'A',     x0: 200, x1: 207, top: 215 },
     { str: 'U',     x0: 207, x1: 214, top: 215 },
     { str: 'T',     x0: 214, x1: 220, top: 215 },
     { str: 'O',     x0: 220, x1: 227, top: 215 },
-    { str: 'TRUCK', x0: 235, x1: 270, top: 215 }
+    { str: 'GAMMA', x0: 235, x1: 270, top: 215 }
   ];
   const out = stripIconText(items);
   // Run di 4 char singoli che spelleranno "AUTO" → tutti rimossi (fase 2)
   assert.equal(out.length, 2);
-  assert.equal(out[0].str, 'MEC');
-  assert.equal(out[1].str, 'TRUCK');
+  assert.equal(out[0].str, 'MODELLO-X');
+  assert.equal(out[1].str, 'GAMMA');
 });
 
 test('stripIconText: ambiguo — rimuove "B" isolato (length=1, width<20, in ICON_STRINGS)', () => {
@@ -512,28 +515,28 @@ test('emitRowFromBand: cabla M4 — descrizione finale non contiene "AUTO" resid
   const codeItem = { str: '01200115', x0: 100, x1: 140, top: 627 };
   const items = [
     codeItem,
-    { str: 'MEC',   x0: 165, x1: 195, top: 630 },
+    { str: 'MODELLO-X', x0: 165, x1: 195, top: 630 },
     { str: '200A',  x0: 200, x1: 230, top: 630 },
-    { str: 'TRUCK', x0: 235, x1: 270, top: 630 },
+    { str: 'GAMMA', x0: 235, x1: 270, top: 630 },
     // icona AUTO renderizzata come 4 char singoli su y leggermente diversa
     { str: 'A',     x0: 200, x1: 207, top: 633 },
     { str: 'U',     x0: 207, x1: 214, top: 633 },
     { str: 'T',     x0: 214, x1: 220, top: 633 },
     { str: 'O',     x0: 220, x1: 227, top: 633 },
-    { str: '10.500,00', x0: 480, x1: 510, top: 627 }
+    { str: '8.500,00', x0: 480, x1: 510, top: 627 }
   ];
   const anchor = { codice: '01200115', top: 627, item: codeItem };
   const row = emitRowFromBand(anchor, items, cols, 22);
   assert.equal(row.codice, '01200115');
-  assert.match(row.descrizione, /^MEC 200A TRUCK$/);
-  assert.equal(row.prezzo, 10500);
+  assert.match(row.descrizione, /^MODELLO-X 200A GAMMA$/);
+  assert.equal(row.prezzo, 8500);
   assert.equal(row.review_flag, '');
 });
 
 // === M5 — multi-code merge ===
 
 test('mergeMultiCodeRows: caso classico §P5 — prev desc+prezzo, next vuoto, dy<35 → merge', () => {
-  // Pag 36 PDF Cormach: 20100202 (y=222) e 20100326 (y=250 dopo aggregazione
+  // Pag 36 PDF di riferimento: 20100202 (y=222) e 20100326 (y=250 dopo aggregazione
   // di banda) condividono "Protezioni torretta" e prezzo 150.
   const rows = [
     { codice: '20100202', descrizione: 'Protezioni torretta. Set di 15 pezzi', prezzo: 150,  pagina: '36', review_flag: '',                  yAnchor: 222 },
@@ -565,11 +568,11 @@ test('mergeMultiCodeRows: backward — cella condivisa con prezzo galleggiante (
 
 test('mergeMultiCodeRows: backward NON scatta verso una riga-prodotto completa (box OPTIONAL pag 57)', () => {
   // 23100209 è il codice-etichetta del box OPTIONAL: sta sopra la riga
-  // completa di 03100074 (prezzo 16.750 sulla propria riga, nessun hint).
+  // completa di 03100074 (prezzo 12.500 sulla propria riga, nessun hint).
   // Rubare quel prezzo sarebbe indovinare → resta PREZZO_MANCANTE.
   const rows = [
-    { codice: '23100209', descrizione: '', prezzo: null, pagina: '57', review_flag: 'PREZZO_MANCANTE', sezione: 'WR 328A > OPTIONAL', yAnchor: 600 },
-    { codice: '03100074', descrizione: 'WR 328A 1ph 230V-50/60Hz', prezzo: 16750, pagina: '57', review_flag: '', sezione: 'WR 328A > OPTIONAL', yAnchor: 669 }
+    { codice: '23100209', descrizione: '', prezzo: null, pagina: '57', review_flag: 'PREZZO_MANCANTE', sezione: 'MODELLO-Y 328A > OPTIONAL', yAnchor: 600 },
+    { codice: '03100074', descrizione: 'MODELLO-Y 328A 1ph 230V-50/60Hz', prezzo: 12500, pagina: '57', review_flag: '', sezione: 'MODELLO-Y 328A > OPTIONAL', yAnchor: 669 }
   ];
   const out = mergeMultiCodeRows(rows);
   assert.equal(out[0].prezzo, null);
@@ -790,7 +793,7 @@ test('hasProductCode vs isCompleteProductRow', () => {
   assert.equal(isCompleteProductRow(tail), false);
 
   // Riga completa
-  const full = ['00100208', 'PUMA', 'CE', '1ph', '230V', '50-60Hz', '3.940,00'];
+  const full = ['00100208', 'ACME', 'CE', '1ph', '230V', '50-60Hz', '2.750,00'];
   assert.equal(hasProductCode(full), true);
   assert.equal(isCompleteProductRow(full), true);
 });
@@ -803,8 +806,8 @@ import {
 } from '../src/pdfParser.js';
 
 test('parsePriceString v5.1: punto migliaia perso e decimali obbligatori', () => {
-  assert.equal(parsePriceString('1000,00'), 1000);   // caso reale pag. 16 Cormach
-  assert.equal(parsePriceString('1100,00'), 1100);   // caso reale pag. 17 Cormach
+  assert.equal(parsePriceString('1000,00'), 1000);   // formato senza separatore migliaia
+  assert.equal(parsePriceString('1100,00'), 1100);   // formato senza separatore migliaia
   assert.equal(parsePriceString('33200,00'), 33200);
   assert.equal(parsePriceString('7,5'), null);       // peso da tabella tecnica, non prezzo
   assert.equal(parsePriceString('188,5'), null);
@@ -885,14 +888,14 @@ test('codeConfidence: tier di confidenza', () => {
   assert.equal(codeConfidence('21100076'), 'high');
   assert.equal(codeConfidence('1234567890123'), 'high'); // 13 cifre (EAN-13)
   assert.equal(codeConfidence('123456789'), 'high');     // 10+ cifre non più scartati... 9 qui
-  assert.equal(codeConfidence('25100310*'), 'high');     // asterisco-nota (pag. 69 Cormach)
+  assert.equal(codeConfidence('25100310*'), 'high');     // asterisco-nota (pag. 69)
   assert.equal(codeConfidence('12345'), 'low');          // 5 cifre
   assert.equal(codeConfidence('FG192/PS2'), 'low');      // alfanumerico fornitore
   assert.equal(codeConfidence('ABC-1234'), 'low');
   assert.equal(codeConfidence('1234'), null);            // ≤4 cifre: troppo ambiguo (anni, modelli)
-  assert.equal(codeConfidence('3.940,00'), null);        // prezzo
+  assert.equal(codeConfidence('2.750,00'), null);        // prezzo
   assert.equal(codeConfidence('30000N'), null);          // numero+unità
-  assert.equal(codeConfidence('2450N'), null);           // sigla modello (Super Vigor 2450N)
+  assert.equal(codeConfidence('9999N'), null);           // sigla modello
   assert.equal(codeConfidence('F535S'), null);           // sigla modello
   assert.equal(codeConfidence('230V-50/60HZ'), null);    // dato elettrico
   assert.equal(codeConfidence('16X12X8'), null);         // dimensioni
@@ -914,9 +917,9 @@ test('joinMultiLineRows: codice alfanumerico a inizio riga → riga emessa con C
 });
 
 test('joinMultiLineRows: sigla alfanumerica in mezzo alla descrizione NON crea righe', () => {
-  // riga di continuazione che contiene "MEC-810X" non deve diventare un prodotto
+  // riga di continuazione che contiene "MOD-810X" non deve diventare un prodotto
   const out = _jml([
-    { tokens: ['21100420', 'Disponibile', 'per', 'TOUCH', 'MEC-810X', 'fino', 'ad'] },
+    { tokens: ['21100420', 'Disponibile', 'per', 'modelli', 'MOD-810X', 'fino', 'ad'] },
     { tokens: ['esaurimento', '880,00'] }
   ], 6);
   assert.equal(out.length, 1);
@@ -965,4 +968,236 @@ test('emitRowFromBand: prezzo spezzato in banda ricomposto, frammento orfano fla
   ], cols, 17);
   assert.equal(fragRow.prezzo, 10);
   assert.match(fragRow.review_flag, /CHECK_PREZZO/);
+});
+
+// === Pattern A — codici-didascalia (box ACCESSORI STANDARD) ===
+// Fixture sintetiche: codici e testi inventati che riproducono il pattern,
+// nessun estratto reale del listino.
+
+test('isDegenerateDesc: vuota o solo punteggiatura/parentesi → true', () => {
+  assert.equal(isDegenerateDesc(''), true);
+  assert.equal(isDegenerateDesc('   '), true);
+  assert.equal(isDegenerateDesc('( )'), true);
+  assert.equal(isDegenerateDesc('()'), true);
+  assert.equal(isDegenerateDesc('- -'), true);
+  assert.equal(isDegenerateDesc(null), true);
+  assert.equal(isDegenerateDesc('(TAG1)'), false);   // ha caratteri alfanumerici
+  assert.equal(isDegenerateDesc('Pinza'), false);
+});
+
+test('classifyDidascalie: codice mai prezzato, tutte occorrenze in ACCESSORI STANDARD → Dotazioni', () => {
+  const rows = [
+    { codice: '90000001', descrizione: '', prezzo: null, pagina: '8', review_flag: 'PREZZO_MANCANTE', sezione: 'macchina A > ACCESSORI STANDARD' },
+    { codice: '90000001', descrizione: '(TAG)', prezzo: null, pagina: '9', review_flag: 'PREZZO_MANCANTE', sezione: 'macchina B > ACCESSORI STANDARD' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(mainRows.length, 0);
+  assert.equal(dotazioni.length, 1);
+  assert.equal(dotazioni[0].codice, '90000001');
+  assert.equal(dotazioni[0].review_flag, 'CODICE_DIDASCALIA');
+  assert.equal(dotazioni[0].pagina, '8, 9');
+  assert.match(dotazioni[0].sezione, /macchina A > ACCESSORI STANDARD/);
+  assert.match(dotazioni[0].sezione, /macchina B > ACCESSORI STANDARD/);
+  assert.equal(dotazioni[0].descrizione, '(TAG)'); // prima desc non-degenerata conservata come info
+});
+
+test('classifyDidascalie: didascalia + vera riga prezzata → tiene solo la riga prezzata', () => {
+  // Didascalia su pagine ACCESSORI STANDARD, prezzata una volta a p.18.
+  const rows = [
+    { codice: '90000002', descrizione: '', prezzo: null, pagina: '8',  review_flag: 'PREZZO_MANCANTE', sezione: 'macchina A > ACCESSORI STANDARD' },
+    { codice: '90000002', descrizione: '', prezzo: null, pagina: '15', review_flag: 'PREZZO_MANCANTE', sezione: 'macchina B > ACCESSORI STANDARD' },
+    { codice: '90000002', descrizione: 'Articolo di prova', prezzo: 55, pagina: '18', review_flag: '', sezione: 'ACCESSORI AUTO' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);                 // niente Dotazioni: ha una riga vera
+  assert.equal(mainRows.length, 1);                  // le 2 didascalie scartate
+  assert.equal(mainRows[0].pagina, '18');
+  assert.equal(mainRows[0].prezzo, 55);
+});
+
+test('classifyDidascalie: badge ricorrente fuori sezione (marchio CE "( )" su >=3 pagine) → Dotazioni', () => {
+  const rows = [
+    { codice: '90000003', descrizione: '( )', prezzo: null, pagina: '26', review_flag: 'PREZZO_MANCANTE', sezione: 'titolo grezzo' },
+    { codice: '90000003', descrizione: '( )', prezzo: null, pagina: '27', review_flag: 'PREZZO_MANCANTE', sezione: 'titolo grezzo' },
+    { codice: '90000003', descrizione: '( )', prezzo: null, pagina: '28', review_flag: 'PREZZO_MANCANTE', sezione: 'titolo grezzo' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(mainRows.length, 0);
+  assert.equal(dotazioni.length, 1);
+  assert.equal(dotazioni[0].codice, '90000003');
+});
+
+test('classifyDidascalie: NON tocca una vera riga senza prezzo fuori ACCESSORI STANDARD (resta nel Listino)', () => {
+  // Accessorio reale con prezzo mancante in una tabella accessori: NON è una
+  // didascalia (una sola pagina, sezione non ACCESSORI STANDARD) → resta.
+  const rows = [
+    { codice: '90000004', descrizione: 'Accessorio senza prezzo', prezzo: null, pagina: '43', review_flag: 'PREZZO_MANCANTE', sezione: 'ACCESSORI SMONTAGOMME' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);
+  assert.equal(mainRows.length, 1);
+  assert.equal(mainRows[0].codice, '90000004');
+});
+
+test('classifyDidascalie: un\'occorrenza-didascalia in ACCESSORI STANDARD scartata, l\'occorrenza matrice sopravvive', () => {
+  // p.27 nel box ACCESSORI STANDARD (didascalia), p.34 nella matrice accessori
+  // (vera riga, prezzo aggiunto poi da Pattern B).
+  const rows = [
+    { codice: '90000005', descrizione: '', prezzo: null, pagina: '27', review_flag: 'PREZZO_MANCANTE', sezione: 'macchina Z > ACCESSORI STANDARD' },
+    { codice: '90000005', descrizione: 'BETA SYSTEM Dispositivo combinato per', prezzo: null, pagina: '34', review_flag: 'PREZZO_MANCANTE', sezione: 'ACCESSORI SMONTAGOMME AUTO' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);                 // ha un'occorrenza matrice → resta nel Listino
+  assert.equal(mainRows.length, 1);
+  assert.equal(mainRows[0].pagina, '34');
+});
+
+test('classifyDidascalie: input vuoto/non-array → strutture vuote', () => {
+  assert.deepEqual(classifyDidascalie([]), { mainRows: [], dotazioni: [] });
+  assert.deepEqual(classifyDidascalie(null), { mainRows: [], dotazioni: [] });
+});
+
+// === Pattern B — celle condivise verticali (matrice) ===
+// Fixture sintetiche: codici e testi inventati che riproducono i rowspan.
+
+test('isFragmentDesc / isSubstantialDesc: distinguono capofila da continuazione', () => {
+  assert.equal(isFragmentDesc('il montaggio dei pneumatici'), true);
+  assert.equal(isFragmentDesc('ruote tubeless'), true);
+  assert.equal(isFragmentDesc('ribassati e RunFlat'), true);
+  assert.equal(isFragmentDesc('ALFA SYSTEM Dispositivo'), false);
+  assert.equal(isFragmentDesc('Gruppo esterno'), false);
+  assert.equal(isFragmentDesc(''), false);
+  assert.equal(isSubstantialDesc('BETA SYSTEM Dispositivo'), true);
+  assert.equal(isSubstantialDesc('Pinza'), true);
+  assert.equal(isSubstantialDesc('ribassati e RunFlat'), false);
+  assert.equal(isSubstantialDesc('( ) gonfiaggio tubeless'), false); // frammento sporco
+  assert.equal(isSubstantialDesc('( )'), false);
+});
+
+test('mergeMatrixGroups: 3 codici, descrizione spezzata + prezzo unico al centro → tutti completi', () => {
+  // Gruppo a 3 codici: capofila col nome, prezzo sulla riga centrale.
+  const rows = [
+    { codice: 'C1', descrizione: 'ALFA SYSTEM Dispositivo combinato per', prezzo: null, pagina: '34', review_flag: 'PREZZO_MANCANTE', sezione: 'MATR', yAnchor: 200 },
+    { codice: 'C2', descrizione: 'il montaggio dei pneumatici',            prezzo: 3400, pagina: '34', review_flag: '',                sezione: 'MATR', yAnchor: 236 },
+    { codice: 'C3', descrizione: 'ribassati e resistenti',                 prezzo: null, pagina: '34', review_flag: 'PREZZO_MANCANTE', sezione: 'MATR', yAnchor: 272 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  const full = 'ALFA SYSTEM Dispositivo combinato per il montaggio dei pneumatici ribassati e resistenti';
+  assert.equal(out[0].descrizione, full);
+  assert.equal(out[1].descrizione, full);
+  assert.equal(out[2].descrizione, full);
+  assert.equal(out[0].prezzo, 3400);            // propagato
+  assert.equal(out[2].prezzo, 3400);            // propagato
+  assert.match(out[2].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.match(out[2].review_flag, /PREZZO_GRUPPO/);
+  assert.doesNotMatch(out[0].review_flag || '', /PREZZO_MANCANTE/);
+});
+
+test('mergeMatrixGroups: due prezzi distinti nel gruppo → propaga solo la descrizione', () => {
+  // Stessa descrizione condivisa, un prezzo distinto per ciascun codice.
+  const rows = [
+    { codice: 'D1', descrizione: 'Gruppo esterno per gonfiaggio', prezzo: 410, pagina: '36', review_flag: '', sezione: 'MATR', yAnchor: 300 },
+    { codice: 'D2', descrizione: 'ruote tubeless',                prezzo: 560, pagina: '36', review_flag: '', sezione: 'MATR', yAnchor: 340 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[0].descrizione, 'Gruppo esterno per gonfiaggio ruote tubeless');
+  assert.equal(out[1].descrizione, 'Gruppo esterno per gonfiaggio ruote tubeless');
+  assert.equal(out[0].prezzo, 410);             // prezzi propri conservati
+  assert.equal(out[1].prezzo, 560);
+  assert.doesNotMatch(out[1].review_flag || '', /PREZZO_GRUPPO/);
+  assert.match(out[1].review_flag, /DESCRIZIONE_GRUPPO/);
+});
+
+test('mergeMatrixGroups: riga vuota che condivide lo stesso prezzo → riceve la descrizione', () => {
+  // Riga vuota con prezzo proprio uguale a quello del gruppo.
+  const rows = [
+    { codice: 'E1', descrizione: 'Set di 3 protezioni paletta stallonatore', prezzo: 120, pagina: '37', review_flag: '', sezione: 'MATR', yAnchor: 380 },
+    { codice: 'E2', descrizione: '',                                          prezzo: 120, pagina: '37', review_flag: '', sezione: 'MATR', yAnchor: 417 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[1].descrizione, 'Set di 3 protezioni paletta stallonatore');
+  assert.equal(out[1].prezzo, 120);
+  assert.match(out[1].review_flag, /DESCRIZIONE_GRUPPO/);
+});
+
+test('mergeMatrixGroups: NON fonde prodotti distinti con prezzi diversi e descrizioni proprie', () => {
+  const rows = [
+    { codice: 'F1', descrizione: '',                prezzo: 800,  pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 208 },
+    { codice: 'F2', descrizione: '',                prezzo: 1300, pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 231 },
+    { codice: 'F3', descrizione: 'Kit radiocomando', prezzo: 3000, pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 607 },
+    { codice: 'F4', descrizione: '',                prezzo: 6000, pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 635 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[0].prezzo, 800);
+  assert.equal(out[1].prezzo, 1300);
+  assert.equal(out[1].descrizione, '');         // niente propagazione (prezzi distinti, non frammento)
+  assert.equal(out[3].prezzo, 6000);
+  assert.doesNotMatch(out[1].review_flag || '', /GRUPPO/);
+});
+
+test('mergeMatrixGroups: sezioni diverse o troppo distanti → nessun gruppo', () => {
+  const rowsSez = [
+    { codice: 'G1', descrizione: 'Capofila prodotto', prezzo: 100, pagina: '1', review_flag: '', sezione: 'A', yAnchor: 200 },
+    { codice: 'G2', descrizione: 'continuazione minuscola', prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE', sezione: 'B', yAnchor: 220 }
+  ];
+  assert.equal(mergeMatrixGroups(rowsSez)[1].prezzo, null);
+  const rowsFar = [
+    { codice: 'H1', descrizione: 'Capofila prodotto', prezzo: 100, pagina: '1', review_flag: '', sezione: 'A', yAnchor: 200 },
+    { codice: 'H2', descrizione: 'continuazione minuscola', prezzo: null, pagina: '1', review_flag: 'PREZZO_MANCANTE', sezione: 'A', yAnchor: 300 }
+  ];
+  assert.equal(mergeMatrixGroups(rowsFar)[1].prezzo, null);
+});
+
+test('mergeMatrixGroups: input vuoto/non-array → []', () => {
+  assert.deepEqual(mergeMatrixGroups([]), []);
+  assert.deepEqual(mergeMatrixGroups(null), []);
+});
+
+test('flagPartialDescriptions: minuscola iniziale o sola parentesi → DESC_PARZIALE', () => {
+  const rows = [
+    { codice: 'A', descrizione: 'tubeless + pedale', prezzo: null, review_flag: 'PREZZO_MANCANTE' },
+    { codice: 'B', descrizione: '(4 pcs)', prezzo: null, review_flag: 'PREZZO_MANCANTE' },
+    { codice: 'C', descrizione: 'Pinza per contrappesi', prezzo: 40, review_flag: '' },
+    { codice: 'D', descrizione: '', prezzo: null, review_flag: 'PREZZO_MANCANTE' }
+  ];
+  flagPartialDescriptions(rows);
+  assert.match(rows[0].review_flag, /DESC_PARZIALE/);
+  assert.match(rows[1].review_flag, /DESC_PARZIALE/);
+  assert.doesNotMatch(rows[2].review_flag || '', /DESC_PARZIALE/); // capofila valida
+  assert.doesNotMatch(rows[3].review_flag || '', /DESC_PARZIALE/); // vuota, non "parziale"
+});
+
+// === Pattern C — banner ricorrente "ACCESSORI OPTIONAL a pag. N" ===
+
+test('stripOptionalBanner: rimuove il banner e ricuce gli spazi', () => {
+  assert.equal(stripOptionalBanner('ACCESSORI OPTIONAL a pag. 16'), '');
+  assert.equal(stripOptionalBanner('(15 pcs) e manometro. ACCESSORI OPTIONAL a pag. 36'),
+    '(15 pcs) e manometro.');
+  assert.equal(stripOptionalBanner('ACCESSORI OPTIONAL a pag 53'), ''); // senza punto
+  assert.equal(stripOptionalBanner('Pinza ACCESSORI OPTIONAL a pag. 8 forata'), 'Pinza forata');
+});
+
+test('stripOptionalBanner: NON tocca il falso positivo 20100334', () => {
+  const d = 'Nuovo dispositivo per avere più luce sul tuo lavoro (su richiesta, se specificato all’ordine)';
+  assert.equal(stripOptionalBanner(d), d);
+});
+
+test('emitRowFromBand: il banner OPTIONAL non diventa descrizione', () => {
+  const cols = {
+    code: [95, 134], descrizione: [134, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95],
+    _anchors: { xCodeLeft: 100, xPriceLeft: 480, xPriceRight: 510 }
+  };
+  const codeItem = { str: '21100057', x0: 100, x1: 130, top: 200, fontSize: 9 };
+  const anchor = { codice: '21100057', top: 200, item: codeItem, confidence: 'high' };
+  const items = [
+    codeItem,
+    { str: 'ACCESSORI', x0: 165, x1: 220, top: 200, fontSize: 9 },
+    { str: 'OPTIONAL',  x0: 222, x1: 270, top: 200, fontSize: 9 },
+    { str: 'a',         x0: 272, x1: 278, top: 200, fontSize: 9 },
+    { str: 'pag.',      x0: 280, x1: 300, top: 200, fontSize: 9 },
+    { str: '16',        x0: 302, x1: 315, top: 200, fontSize: 9 }
+  ];
+  const row = emitRowFromBand(anchor, items, cols, 8);
+  assert.equal(row.descrizione, '');
 });

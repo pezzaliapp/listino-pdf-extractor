@@ -8,3 +8,6 @@ dist
 *.xls
 *.xlsm
 *.csv
+*.pdf
+dati-riservati/
+test-data/

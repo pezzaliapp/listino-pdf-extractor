@@ -18,21 +18,21 @@ test('unisce 2 righe consecutive: codice+desc parziale, poi resto+prezzo', () =>
 
 test('unisce 3 righe: codice+desc1, desc2 (no prezzo), desc3+prezzo', () => {
   const linee = [
-    { tokens: ['21100420', 'Disponibile', 'per', 'MEC', '810', '-', 'MEC', '820', '-', 'MEC', '200'] },
-    { tokens: ['TRUCK', '-', 'MEC', '22', '-', 'MEC', '110', 'fino', 'ad'] },
+    { tokens: ['21100420', 'Disponibile', 'per', 'MODELLO-X', '810', '-', 'MODELLO-X', '820', '-', 'MODELLO-X', '200'] },
+    { tokens: ['GAMMA', '-', 'MODELLO-X', '22', '-', 'MODELLO-X', '110', 'fino', 'ad'] },
     { tokens: ['esaurimento', 'scorte', '880,00'] }
   ];
   const out = joinMultiLineRows(linee, 6);
   assert.equal(out.length, 1);
   assert.equal(out[0].prezzo, 880);
-  assert.match(out[0].descrizione, /TRUCK/);
+  assert.match(out[0].descrizione, /GAMMA/);
   assert.match(out[0].descrizione, /esaurimento/);
 });
 
 test('NON unisce se la riga successiva ha un altro codice', () => {
   const linee = [
-    { tokens: ['00100208', 'PUMA', 'CE', '3.940,00'] },
-    { tokens: ['00100210', 'CM', '1200BB', '3.940,00'] }
+    { tokens: ['00100208', 'ACME', 'CE', '2.750,00'] },
+    { tokens: ['00100210', 'ACME', '200', '2.750,00'] }
   ];
   const out = joinMultiLineRows(linee, 6);
   assert.equal(out.length, 2);

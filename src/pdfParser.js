@@ -1,9 +1,9 @@
 // PDF parsing utilities for v4: code/description/price/page extraction with multi-line support.
 
 /**
- * Accept Italian price formats: "3.940,00", "880,00", "1.500", "1.500,00",
+ * Accept Italian price formats: "2.750,00", "880,00", "1.500", "1.500,00",
  * e — nuovo — "1100,00" (il punto delle migliaia perso dall'estrazione pdf.js,
- * caso reale pagg. 16-17 listino Cormach: "1.000,00" → item "1000,00").
+ * caso reale pagg. 16-17 del PDF di riferimento: "1.000,00" → item "1000,00").
  * Reject:
  *   - "21.100.057" (2+ dots without comma → product code, not a price)
  *   - "21100076"   (digits without separators → product code)
@@ -281,6 +281,141 @@ export function aggregateAcrossPages(rowsByPage) {
   return out;
 }
 
+// === Pattern A — codici-didascalia (box "ACCESSORI STANDARD") ===
+
+const ACCESSORI_STD_RE = /ACCESSORI STANDARD/i;
+
+function _isNoPrice(row) {
+  return !row || row.prezzo === null || row.prezzo === undefined || row.prezzo === '';
+}
+
+/** True se la descrizione è "degenerata": vuota o composta soltanto da
+ *  punteggiatura/parentesi/spazi (es. "", "( )", "()", "- -"). Sono le
+ *  didascalie-badge dei box ACCESSORI STANDARD (codice sotto la foto,
+ *  marchio CE "( )"), mai vere righe di listino. */
+export function isDegenerateDesc(desc) {
+  const t = String(desc == null ? '' : desc).trim();
+  if (!t) return true;
+  return t.replace(/[^0-9A-Za-zÀ-ÿ]/g, '') === '';
+}
+
+function _distinctPages(occs) {
+  const pages = [];
+  for (const o of occs) {
+    for (const p of String(o.pagina || '').split(',').map(s => s.trim()).filter(Boolean)) {
+      if (!pages.includes(p)) pages.push(p);
+    }
+  }
+  return pages;
+}
+
+/** True se la descrizione ha l'aria di un vero nome-prodotto: la prima lettera
+ *  (ignorando punteggiatura/parentesi/cifre iniziali) è MAIUSCOLA. Le vere righe
+ *  di listino aprono con una maiuscola ("BETA SYSTEM", "Pinza"); i frammenti che
+ *  colano sulle didascalie iniziano in minuscola ("gonfiaggio tubeless",
+ *  "capacità coni"). Serve a distinguere una didascalia-badge da un membro di
+ *  matrice (Pattern B) che aspetta ancora prezzo/descrizione. */
+export function isSubstantialDesc(desc) {
+  const t = String(desc == null ? '' : desc).trim();
+  const m = t.match(/[A-Za-zÀ-ÿ]/);
+  if (!m) return false;
+  const ch = m[0];
+  return ch === ch.toUpperCase() && ch !== ch.toLowerCase();
+}
+
+/**
+ * Pattern A — separa le occorrenze-didascalia (righe pre-aggregazione, ognuna
+ * su una sola pagina) dalle vere righe di listino.
+ *
+ * Un'occorrenza è didascalia quando NON ha prezzo sulla propria banda e:
+ *   - sta nel riquadro ACCESSORI STANDARD (sezione contiene "ACCESSORI
+ *     STANDARD"): sono le foto con il codice stampato sotto, dotazione di
+ *     serie e non articolo prezzato; OPPURE
+ *   - il codice è un "badge" ricorrente: mai prezzato in tutto il PDF, con
+ *     descrizione sempre degenerata (es. marchio CE "( )") e presente su ≥ 3
+ *     pagine. Copre i badge fuori da una sezione ACCESSORI STANDARD nominata
+ *     (es. 41100028 con sezione = titolo pagina grezzo).
+ *
+ * Esiti per codice:
+ *   - se resta almeno un'occorrenza NON didascalia (vera riga, magari senza
+ *     prezzo perché completata più avanti da Pattern B), le didascalie vengono
+ *     semplicemente scartate e il codice prosegue verso il Listino;
+ *   - se TUTTE le occorrenze sono didascalia, il codice non è mai una riga di
+ *     listino: finisce in `dotazioni` con flag CODICE_DIDASCALIA e l'elenco di
+ *     pagine e sezioni (macchine) in cui compare.
+ *
+ * Ritorna { mainRows, dotazioni }. `mainRows` va aggregato e mandato al
+ * Listino; `dotazioni` popola il foglio "Dotazioni standard". Le didascalie
+ * NON entrano nel denominatore dei prezzi mancanti (sono escluse da mainRows).
+ */
+export function classifyDidascalie(allRows) {
+  const rows = Array.isArray(allRows) ? allRows : [];
+  const byCode = new Map();
+  for (const r of rows) {
+    if (!r) continue;
+    if (!byCode.has(r.codice)) byCode.set(r.codice, []);
+    byCode.get(r.codice).push(r);
+  }
+
+  // Codici-didascalia "interi": mai prezzati in tutto il PDF e senza NESSUNA
+  // descrizione sostanziale (nome-prodotto con l'iniziale maiuscola). Due firme:
+  //   - compaiono nel box ACCESSORI STANDARD (dotazione di serie mostrata come
+  //     foto+codice) — es. 21100076, 41100028 (marchio CE "( )" che cola su più
+  //     schede); OPPURE
+  //   - sono badge ricorrenti sempre degenerati su ≥ 3 pagine, anche fuori da
+  //     una sezione ACCESSORI STANDARD nominata.
+  // La condizione "nessuna descrizione sostanziale" evita di catturare i membri
+  // di matrice (Pattern B), la cui riga vera apre con una maiuscola
+  // ("BETA SYSTEM …") e attende solo che il prezzo del gruppo venga propagato.
+  const captionCodes = new Set();
+  for (const [code, occs] of byCode.entries()) {
+    const neverPriced = occs.every(_isNoPrice);
+    if (!neverPriced) continue;
+    const hasSubstantial = occs.some(o => isSubstantialDesc(o.descrizione));
+    if (hasSubstantial) continue;
+    const inAccStandard = occs.some(o => ACCESSORI_STD_RE.test(String(o.sezione || '')));
+    const allDegenerate = occs.every(o => isDegenerateDesc(o.descrizione));
+    const badgeByRepetition = allDegenerate && _distinctPages(occs).length >= 3;
+    if (inAccStandard || badgeByRepetition) captionCodes.add(code);
+  }
+
+  const mainRows = [];
+  const captionByCode = new Map();
+  for (const r of rows) {
+    const isCaption = captionCodes.has(r.codice) ||
+      (_isNoPrice(r) && ACCESSORI_STD_RE.test(String(r.sezione || '')));
+    if (isCaption) {
+      if (!captionByCode.has(r.codice)) captionByCode.set(r.codice, []);
+      captionByCode.get(r.codice).push(r);
+    } else {
+      mainRows.push(r);
+    }
+  }
+
+  const mainCodes = new Set(mainRows.map(r => r.codice));
+  const dotazioni = [];
+  for (const [code, occs] of captionByCode.entries()) {
+    if (mainCodes.has(code)) continue; // il codice ha comunque una vera riga → didascalie scartate
+    const firstInfo = occs.map(o => String(o.descrizione || '').trim())
+      .find(d => d && !isDegenerateDesc(d)) || '';
+    const sezioni = [];
+    for (const o of occs) {
+      const s = String(o.sezione || '').trim();
+      if (s && !sezioni.includes(s)) sezioni.push(s);
+    }
+    dotazioni.push({
+      codice: code,
+      descrizione: firstInfo,
+      prezzo: null,
+      pagina: _distinctPages(occs).join(', '),
+      review_flag: 'CODICE_DIDASCALIA',
+      sezione: sezioni.join('; ')
+    });
+  }
+  dotazioni.sort((a, b) => a.codice.localeCompare(b.codice));
+  return { mainRows, dotazioni };
+}
+
 // === pdf.js layer ===
 
 /**
@@ -390,7 +525,7 @@ export function filterSideNotes(items, noteLateraliBand) {
 /**
  * M3 — Filtro header verticale (rotated header).
  * Identifica i text item che sono caratteri 1-2 di intestazioni di colonna
- * ruotate 90° (es. "TOUCH MEC 2000S" sparpagliato come singole lettere
+ * ruotate 90° (es. "MODELLO-X 2000S" sparpagliato come singole lettere
  * sopra la prima riga di dati). Criteri (pseudocodifica SPEC §M3):
  *   - top < firstAnchorTop - 5     (sopra il primo codice della pagina,
  *                                   in coord display-top: piccolo = alto)
@@ -460,7 +595,7 @@ function lineToTokens(line) {
 }
 
 /**
- * M4 — Whitelist di stringhe icona presenti nei badge grafici dei PDF Cormach.
+ * M4 — Whitelist di stringhe icona presenti nei badge grafici del PDF di riferimento.
  * Usata da stripIconText con due criteri distinti (per-item e sequenza).
  */
 export const ICON_STRINGS = new Set([
@@ -666,6 +801,25 @@ export function classifyXBand(item, columnBands) {
 }
 
 /**
+ * Pattern C — banner grafico ricorrente "ACCESSORI OPTIONAL a pag. N", presente
+ * su quasi ogni scheda prodotto: non è una descrizione e va rimosso. Il match è
+ * mirato (parola-banner + "a pag." + numero) per non toccare le vere righe di
+ * listino con parole simili — es. 20100334 "Nuovo dispositivo per avere più luce
+ * sul tuo lavoro (su richiesta, se specificato all'ordine)", che NON contiene il
+ * banner e resta intatta.
+ */
+export const BANNER_OPTIONAL_RE = /ACCESSORI OPTIONAL a pag\.?\s*\d+/ig;
+
+/** Rimuove il banner Pattern C da una descrizione già composta. */
+export function stripOptionalBanner(desc) {
+  return String(desc == null ? '' : desc)
+    .replace(BANNER_OPTIONAL_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:])/g, '$1')
+    .trim();
+}
+
+/**
  * M1 — Costruisce una riga prodotto dalla banda di un anchor.
  *  - descrizione: concatenazione (top↑, x0↑) degli item in fascia 'descrizione'
  *  - prezzo: primo prezzo valido in fascia 'prezzo' (parsePriceString)
@@ -755,13 +909,10 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
 
   // M4 — strip icon text dai descItems prima di comporre la descrizione
   const cleanDescItems = stripIconText(descItems);
-  const descrizione = cleanDescItems
+  const descrizione = stripOptionalBanner(cleanDescItems
     .map(it => String(it.str || '').trim())
     .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .replace(/\s+([,.;:])/g, '$1')
-    .trim();
+    .join(' '));  // Pattern C — via il banner "ACCESSORI OPTIONAL a pag. N"
 
   const flags = [];
   if (multiPrice) flags.push('MULTI_PRICE');
@@ -903,7 +1054,7 @@ export function assignSectionToRow(yAnchor, pageTitle, markers) {
  *   - r_{i+1}.descrizione vuota AND r_{i+1}.prezzo null
  *   - |r_{i+1}.yAnchor - r_i.yAnchor| < 35
  *
- * Falso positivo da NON mergare (caso pag 54 PDF Cormach): 20100112 e
+ * Falso positivo da NON mergare (caso pag 54 PDF di riferimento): 20100112 e
  * 20100362 hanno entrambi descrizione "Kit radiocomando" e prezzi diversi
  * (3.100 / 5.800) → next.descrizione non-vuota → no merge.
  *
@@ -911,7 +1062,7 @@ export function assignSectionToRow(yAnchor, pageTitle, markers) {
  * stessa pagina (è il caso naturale di output di buildBandsFromAnchors).
  *
  * NOTA: il merge è iterativo, quindi cascade A→B→C si propaga (B prende
- * da A, poi C prende da B). Sul listino Cormach reale non sono attesi
+ * da A, poi C prende da B). Sul PDF di riferimento reale non sono attesi
  * cascade (i pattern P5 sono sempre coppie), ma il comportamento non è
  * esplicitamente verificato. Se in futuro un listino producesse cascade
  * indesiderati, l'opzione è limitare l'iterazione a un singolo passaggio.
@@ -935,7 +1086,7 @@ export function mergeMultiCodeRows(rows) {
   }
   // Passata simmetrica: cella verticale unita in cui prezzo (ed eventuale
   // descrizione) cadono nella banda del codice INFERIORE, lasciando vuota la
-  // riga sopra (es. 20100202 / 20100326* a pag. 36 del listino Cormach).
+  // riga sopra (es. 20100202 / 20100326* a pag. 36 del listino di riferimento).
   // Guardie: la riga sopra deve essere completamente vuota, le due righe
   // devono appartenere alla stessa sezione (evita che un codice-etichetta di
   // "ACCESSORI STANDARD" rubi il prezzo alla tabella prodotti sottostante) e
@@ -967,6 +1118,142 @@ export function mergeMultiCodeRows(rows) {
     prev.review_flag = 'MERGED_FROM_NEXT';
   }
   return out;
+}
+
+// === Pattern B — celle condivise verticali (tabelle-matrice) ===
+
+const GROUP_DY = 50; // passo verticale tipico delle righe nelle matrici accessori
+
+function _isEmptyDesc(d) {
+  return !String(d == null ? '' : d).trim();
+}
+
+/** Una descrizione è "frammento di continuazione" quando la prima lettera è
+ *  minuscola: nelle matrici la cella unica cola su più codici e le righe non
+ *  capofila iniziano a metà frase ("il montaggio/…", "ribassati e…",
+ *  "ruote tubeless"). Il complemento (iniziale maiuscola) è una capofila. */
+export function isFragmentDesc(d) {
+  const t = String(d == null ? '' : d).trim();
+  const m = t.match(/[A-Za-zÀ-ÿ]/);
+  if (!m) return false;
+  const ch = m[0];
+  return ch === ch.toLowerCase() && ch !== ch.toUpperCase();
+}
+
+function _flagList(row) {
+  return new Set(String(row.review_flag || '').split(';').map(s => s.trim()).filter(Boolean));
+}
+
+function _distinctNonNull(vals) {
+  return [...new Set(vals.filter(v => v !== null && v !== undefined && v !== ''))];
+}
+
+/**
+ * Pattern B — celle descrizione/prezzo condivise verticalmente da un gruppo di
+ * 2-3 codici (righe-matrice: pagg. 34-39, 42-45, 54-55, 81-82 del PDF di riferimento).
+ *
+ * pdf.js aggancia la cella al codice più vicino: la descrizione unica esce
+ * spezzata (la capofila tiene il nome, le righe sotto solo i frammenti
+ * "il montaggio/…", "ribassati e…") e i codici senza prezzo restano nudi.
+ *
+ * Qui i codici consecutivi che condividono una cella vengono raccolti in un
+ * gruppo e:
+ *   - la descrizione INTERA (ricomposta concatenando i frammenti in ordine di
+ *     riga) è propagata a tutti i membri;
+ *   - il prezzo è propagato SOLO se la matrice non lo distingue per codice
+ *     (un unico prezzo nel gruppo → celle unite; più prezzi distinti → ogni
+ *     codice ha il suo, es. p.36 20100402/20100405 con prezzi distinti per codice).
+ *
+ * Righe non-capofila: flag DESCRIZIONE_GRUPPO (descrizione presa dal gruppo) e
+ * PREZZO_GRUPPO (prezzo preso dal gruppo). Complementa mergeMultiCodeRows, che
+ * gira prima e riempie i rowspan a codice nudo (MERGED_FROM_PREV/NEXT).
+ *
+ * Un membro entra nel gruppo del precedente se, stessa sezione e vicino
+ * (|dy| < GROUP_DY):
+ *   - la sua descrizione è un frammento di continuazione (minuscola); oppure
+ *   - è vuota e condivide lo STESSO prezzo del gruppo (cella unita a più codici
+ *     con lo stesso importo, es. p.37 20100404).
+ * Una riga con descrizione propria (iniziale maiuscola) apre un nuovo gruppo:
+ * così due prodotti distinti con prezzi diversi (p.54) non si fondono mai.
+ */
+export function mergeMatrixGroups(rows) {
+  if (!Array.isArray(rows)) return [];
+  const out = rows.map(r => ({ ...r }));
+  let i = 0;
+  while (i < out.length) {
+    const group = [out[i]];
+    let j = i + 1;
+    while (j < out.length) {
+      const prev = out[j - 1];
+      const cur = out[j];
+      if ((prev.sezione ?? '') !== (cur.sezione ?? '')) break;
+      const dy = Math.abs(Number(cur.yAnchor) - Number(prev.yAnchor));
+      if (!Number.isFinite(dy) || dy >= GROUP_DY) break;
+      const groupPrices = _distinctNonNull(group.map(g => g.prezzo));
+      let joins = false;
+      if (isFragmentDesc(cur.descrizione)) {
+        joins = true;
+      } else if (_isEmptyDesc(cur.descrizione)) {
+        // vuota: entra solo se condivide un prezzo già presente nel gruppo
+        // (stessa cella, stesso importo). Le vuote a prezzo nullo restano a
+        // mergeMultiCodeRows, che ha guardie più strette (evita p.54/p.43).
+        joins = cur.prezzo != null && groupPrices.length === 1 && cur.prezzo === groupPrices[0];
+      }
+      if (!joins) break;
+      group.push(cur);
+      j++;
+    }
+    if (group.length >= 2) _applyMatrixGroup(group);
+    i = j > i ? j : i + 1;
+  }
+  return out;
+}
+
+function _applyMatrixGroup(group) {
+  const fullDesc = group
+    .map(g => String(g.descrizione || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const prices = _distinctNonNull(group.map(g => g.prezzo));
+  const singlePrice = prices.length === 1 ? prices[0] : null;
+  // capofila descrizione: la prima riga del gruppo (porta il nome-prodotto).
+  for (let k = 0; k < group.length; k++) {
+    const m = group[k];
+    const flags = _flagList(m);
+    const hadOwnDesc = !_isEmptyDesc(m.descrizione) && !isFragmentDesc(m.descrizione);
+    if (fullDesc) m.descrizione = fullDesc;
+    if (k > 0 || !hadOwnDesc) flags.add('DESCRIZIONE_GRUPPO');
+    if (singlePrice !== null && (m.prezzo === null || m.prezzo === undefined || m.prezzo === '')) {
+      m.prezzo = singlePrice;
+      flags.add('PREZZO_GRUPPO');
+      flags.delete('PREZZO_MANCANTE');
+    }
+    m.review_flag = [...flags].join(';');
+  }
+}
+
+/**
+ * Guardia DESC_PARZIALE — una descrizione finale che inizia in minuscola (o con
+ * articolo/preposizione) o è composta solo da una parentesi ("(4 pcs)",
+ * "(MEC1)") non è mai una descrizione buona: viene segnalata, mai emessa in
+ * silenzio. Non tocca le descrizioni vuote (già coperte da PREZZO_MANCANTE /
+ * riga vuota) né quelle che aprono con una maiuscola.
+ */
+export function flagPartialDescriptions(rows) {
+  if (!Array.isArray(rows)) return rows;
+  for (const r of rows) {
+    if (!r) continue;
+    const t = String(r.descrizione || '').trim();
+    if (!t) continue;
+    const soloParentesi = /^\([^)]*\)$/.test(t);
+    if (!(isFragmentDesc(t) || soloParentesi)) continue;
+    const flags = _flagList(r);
+    flags.add('DESC_PARZIALE');
+    r.review_flag = [...flags].join(';');
+  }
+  return rows;
 }
 
 /** Estrae righe-prodotto da un PDFDocumentProxy di pdfjs-dist (anchor-first, v5). */
@@ -1043,28 +1330,60 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
       }
     }
 
-    // M5 — merge multi-codice intra-page
+    // M5 — merge multi-codice intra-page (rowspan a codice nudo). yAnchor resta
+    // sulle righe: serve al raggruppamento matrice (Pattern B), fatto più sotto
+    // sui superstiti. _prezzoGalleggiante è già stato consumato qui e si scarta.
     const mergedPageRows = mergeMultiCodeRows(pageRows);
     for (const r of mergedPageRows) {
-      const { yAnchor: _y, _prezzoGalleggiante: _pg, ...clean } = r;
+      const { _prezzoGalleggiante: _pg, ...clean } = r;
       allRows.push(clean);
     }
   }
 
-  const rows = aggregateAcrossPages(allRows);
+  // Pattern A — separa le occorrenze-didascalia (box ACCESSORI STANDARD) dalle
+  // vere righe di listino PRIMA di Pattern B e dell'aggregazione: così un codice
+  // come 21100240 (didascalia su molte pagine, prezzato solo a pag.18) aggrega
+  // la sola occorrenza reale, e i badge (es. 41100028 "( )") non finiscono per
+  // sbaglio dentro un gruppo-matrice che ne "gonfierebbe" la descrizione.
+  const { mainRows, dotazioni } = classifyDidascalie(allRows);
+
+  // Pattern B — celle descrizione/prezzo condivise da un gruppo di codici,
+  // applicato per pagina sui superstiti (le righe di ogni pagina sono già in
+  // ordine visivo top→bottom nell'ordine di allRows).
+  const byPage = new Map();
+  for (const r of mainRows) {
+    const k = String(r.pagina || '');
+    if (!byPage.has(k)) byPage.set(k, []);
+    byPage.get(k).push(r);
+  }
+  const groupedRows = [];
+  for (const pageRows of byPage.values()) {
+    for (const r of mergeMatrixGroups(pageRows)) {
+      const { yAnchor: _y, ...clean } = r;
+      groupedRows.push(clean);
+    }
+  }
+
+  const rows = aggregateAcrossPages(groupedRows);
+  // Guardia Pattern B: nessuna descrizione parziale (minuscola/solo parentesi)
+  // esce silenziosamente come buona.
+  flagPartialDescriptions(rows);
   const rows_in_check = rows.filter(r => r.review_flag).length;
 
   onLog(`Pagine totali: ${pages_total} (con testo: ${pages_with_text}, solo immagine: ${pages_image_only}).`);
   onLog(`Righe estratte: ${rows.length}.`);
+  if (dotazioni.length) onLog(`Codici-didascalia (Dotazioni standard): ${dotazioni.length}.`);
   if (rows_in_check) onLog(`Righe in CHECK: ${rows_in_check}.`);
 
   return {
     rows,
+    dotazioni,
     meta: {
       pages_total,
       pages_with_text,
       pages_image_only,
       rows_extracted: rows.length,
+      dotazioni_count: dotazioni.length,
       rows_in_check
     }
   };

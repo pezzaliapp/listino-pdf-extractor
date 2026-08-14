@@ -90,7 +90,7 @@ export const MANUAL_HTML = `
 
       <section id="m-8">
         <h2>8. Versione</h2>
-        <p>v5.0.0 — Autore: pezzaliapp.</p>
+        <p>v5.3.0 — Autore: pezzaliapp.</p>
       </section>
     </div>
   </div>
