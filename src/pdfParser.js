@@ -331,6 +331,9 @@ export function isSubstantialDesc(desc) {
  *  nome-prodotto, quindi non deve salvare il codice dalla sezione Dotazioni. */
 export function stripLayoutNoise(desc) {
   return String(desc == null ? '' : desc)
+    .replace(/^\s*PC\s*$/i, ' ')                               // etichetta-icona "PC"
+    .replace(/^\s*\d+\s*x\s*$/i, ' ')                          // nota-quantità "4x"
+    .replace(/^Diametro\s+(?:Cerchio|Ruota)\b.*$/i, ' ')       // etichetta-specifica "Diametro Cerchio 11-25"
     .replace(/Ø\s*mm\s*\d+/gi, ' ')                            // note dimensione (Ø non-ASCII: niente \b)
     .replace(/\(\s*\d+\s*pcs?\s*\)/gi, ' ')                    // note quantità "(3 pcs)"
     .replace(/\b(?:ACCESSORI\s+STANDARD|ACCESSORI\s+OPTIONAL|OPTIONAL\s+CONSIGLIATI|OPTIONAL)\b/gi, ' ')
@@ -394,8 +397,11 @@ export function classifyDidascalie(allRows) {
     // "Ø mm 145".
     const hasSubstantial = occs.some(o => isSubstantialDesc(stripLayoutNoise(o.descrizione)));
     if (hasSubstantial) continue;
-    const inAccStandard = occs.some(o => ACCESSORI_STD_RE.test(String(o.sezione || '')));
-    const allDegenerate = occs.every(o => isDegenerateDesc(o.descrizione));
+    // inAccStandard: la sezione nominata, OPPURE l'hint di colonna delle gallerie
+    // a tutta pagina (box ACCESSORI STANDARD a colonne, sezione non nominata).
+    const inAccStandard = occs.some(o =>
+      ACCESSORI_STD_RE.test(String(o.sezione || '')) || o._boxAccStandard);
+    const allDegenerate = occs.every(o => isDegenerateDesc(stripLayoutNoise(o.descrizione)));
     const badgeByRepetition = allDegenerate && _distinctPages(occs).length >= 3;
     if (inAccStandard || badgeByRepetition) captionCodes.add(code);
   }
@@ -404,7 +410,11 @@ export function classifyDidascalie(allRows) {
   const captionByCode = new Map();
   for (const r of rows) {
     const isCaption = captionCodes.has(r.codice) ||
-      (_isNoPrice(r) && ACCESSORI_STD_RE.test(String(r.sezione || '')));
+      // box ACCESSORI STANDARD nominato: didascalia sempre (comportamento storico)
+      (_isNoPrice(r) && ACCESSORI_STD_RE.test(String(r.sezione || ''))) ||
+      // box a colonne di una galleria (sezione non nominata): solo se la
+      // descrizione è degenerata dopo aver tolto le pseudo-etichette.
+      (_isNoPrice(r) && r._boxAccStandard && isDegenerateDesc(stripLayoutNoise(r.descrizione)));
     if (isCaption) {
       if (!captionByCode.has(r.codice)) captionByCode.set(r.codice, []);
       captionByCode.get(r.codice).push(r);
@@ -417,7 +427,10 @@ export function classifyDidascalie(allRows) {
   const dotazioni = [];
   for (const [code, occs] of captionByCode.entries()) {
     if (mainCodes.has(code)) continue; // il codice ha comunque una vera riga → didascalie scartate
-    const firstInfo = occs.map(o => String(o.descrizione || '').trim())
+    // Descrizione-info conservata solo se è un vero testo: le pseudo-etichette di
+    // icona/specifica ("PC", "4x", "Diametro Cerchio 11-25") vengono scartate da
+    // stripLayoutNoise → la dotazione esce con descrizione vuota.
+    const firstInfo = occs.map(o => stripLayoutNoise(o.descrizione))
       .find(d => d && !isDegenerateDesc(d)) || '';
     const sezioni = [];
     for (const o of occs) {
@@ -1136,6 +1149,96 @@ export function findSectionMarkers(items) {
   return out;
 }
 
+const SECTION_MARKER_GAP = 40; // gap x che separa due colonne-marker sulla stessa riga
+
+// Pagine-galleria a tutta pagina in cui il box ACCESSORI STANDARD è a colonne e
+// findSectionMarkers (match sull'intera riga) non lo riconosce. Scelta di scope
+// DELIBERATA e diagnosticata: il box a due colonne "ACCESSORI STANDARD |
+// OPTIONAL" esiste anche sulle SCHEDE prodotto, dove però quei codici sono
+// membri di matrice/righe reali; una regola geometrica generale li
+// travolgerebbe. Limitare l'hint a queste pagine isola i codici-didascalia
+// delle gallerie senza toccare il resto. Da rivedere se cambia l'impaginazione.
+const ACC_STD_GALLERY_PAGES = new Set([52, 63, 64]);
+
+/** Mappa il testo (uppercase) di un run su un marker noto, o null. Gestisce la
+ *  variante "ACCESSORI STANDARD PER COD. NNN" (e la 'A' iniziale persa
+ *  dall'estrazione) come ACCESSORI STANDARD; OPTIONAL/ACCESSORI OPTIONAL restano
+ *  match esatti per non catturare il banner "ACCESSORI OPTIONAL a pag. N". */
+function _matchSectionMarker(norm) {
+  if (SECTION_MARKERS.has(norm)) return norm;
+  if (/^A?CCESSORI STANDARD\b/.test(norm)) return 'ACCESSORI STANDARD';
+  return null;
+}
+
+/**
+ * Rileva i banner di sezione a COLONNE (run x-contigui, gap > SECTION_MARKER_GAP):
+ * gallerie a tutta pagina dove "ACCESSORI STANDARD" (sinistra) convive sulla
+ * stessa y con "OPTIONAL" (destra), o è scritto "ACCESSORI STANDARD PER COD. NNN".
+ * Ritorna `{text, top, xMin, xMax}` per run-marker. Hint di colonna: NON tocca
+ * il campo Sezione.
+ */
+export function detectSectionColumns(items) {
+  if (!Array.isArray(items)) return [];
+  const clean = items
+    .filter(it => it && typeof it.str === 'string' && String(it.str).trim())
+    .sort((a, b) => (Number(a.top) - Number(b.top)) || (Number(a.x0) - Number(b.x0)));
+  const rows = [];
+  for (const it of clean) {
+    const top = Number(it.top);
+    if (!Number.isFinite(top)) continue;
+    const last = rows[rows.length - 1];
+    if (last && Math.abs(last.top - top) <= 2) last.items.push(it);
+    else rows.push({ top, items: [it] });
+  }
+  const out = [];
+  for (const row of rows) {
+    const its = row.items.slice().sort((a, b) => Number(a.x0) - Number(b.x0));
+    let run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const norm = run.map(i => String(i.str).trim()).join(' ').toUpperCase().replace(/\s+/g, ' ').trim();
+      const marker = _matchSectionMarker(norm);
+      if (marker) {
+        out.push({
+          text: marker,
+          top: row.top,
+          xMin: Math.min(...run.map(i => Number(i.x0))),
+          xMax: Math.max(...run.map(i => Number(i.x1)))
+        });
+      }
+      run = [];
+    };
+    for (const it of its) {
+      if (run.length && Number(it.x0) - Number(run[run.length - 1].x1) > SECTION_MARKER_GAP) flush();
+      run.push(it);
+    }
+    flush();
+  }
+  return out;
+}
+
+/** True se il codice a (top, x) sta nella COLONNA "ACCESSORI STANDARD": tra i
+ *  marker sopra la sua riga, quello la cui colonna (xMin più a destra ≤ x)
+ *  governa il codice è ACCESSORI STANDARD (non OPTIONAL). Esclude così la colonna
+ *  OPTIONAL di destra. */
+export function isInAccStandardColumn(cols, top, x) {
+  if (!Array.isArray(cols) || !cols.length) return false;
+  const yT = Number(top);
+  const xC = Number(x);
+  if (!Number.isFinite(yT)) return false;
+  const above = cols.filter(c => Number(c.top) < yT);
+  if (!above.length) return false;
+  if (!Number.isFinite(xC)) return above.some(c => c.text === 'ACCESSORI STANDARD');
+  let best = null;
+  for (const c of above) {
+    if (Number(c.xMin) - 5 > xC) continue;
+    if (!best || Number(c.xMin) > Number(best.xMin) ||
+        (Number(c.xMin) === Number(best.xMin) && Number(c.top) > Number(best.top))) best = c;
+  }
+  if (!best) best = above.slice().sort((a, b) => Number(a.xMin) - Number(b.xMin) || Number(b.top) - Number(a.top))[0];
+  return !!best && best.text === 'ACCESSORI STANDARD';
+}
+
 /**
  * M6 — Determina la sezione di una row dato il suo yAnchor, il titolo pagina
  * e la lista di marker (ordinata per top crescente).
@@ -1515,6 +1618,9 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     // M6 — section detection (titolo pagina + marker sotto-sezione)
     const pageTitle = detectPageTitle(items);
     const sectionMarkers = findSectionMarkers(items);
+    // Hint di colonna (NON tocca Sezione), SOLO sulle pagine-galleria note: box
+    // ACCESSORI STANDARD a colonne che findSectionMarkers non vede.
+    const sectionColumns = ACC_STD_GALLERY_PAGES.has(pageNum) ? detectSectionColumns(items) : [];
 
     const bands = buildBandsFromAnchors(anchors, 0, pageHeight);
     for (const b of bands) {
@@ -1527,6 +1633,10 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
       const row = emitRowFromBand(band.anchor, bandItems, cols, pageNum);
       if (row) {
         row.sezione = assignSectionToRow(band.anchor.top, pageTitle, sectionMarkers);
+        if (sectionColumns.length && isInAccStandardColumn(sectionColumns, band.anchor.top,
+            Number(band.anchor.item && band.anchor.item.x0))) {
+          row._boxAccStandard = true;
+        }
         pageRows.push({ ...row, yAnchor: band.anchor.top });
       }
     }
@@ -1570,7 +1680,7 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     const floated = propagateFloatingDescriptions(pageRows);
     const merged = mergeMatrixGroups(floated);
     for (const r of merged) {
-      const { yAnchor: _y, _descGalleggiante: _dg, ...clean } = r;
+      const { yAnchor: _y, _descGalleggiante: _dg, _boxAccStandard: _bx, ...clean } = r;
       groupedRows.push(clean);
     }
   }

@@ -12,7 +12,8 @@ import {
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
   stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation,
-  reclassifyContaminatedDidascalie, propagateFloatingDescriptions
+  reclassifyContaminatedDidascalie, propagateFloatingDescriptions,
+  detectSectionColumns, isInAccStandardColumn
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1464,4 +1465,74 @@ test('propagateFloatingDescriptions: singleton (nessuna riga vuota accanto) → 
 test('propagateFloatingDescriptions: input difensivo', () => {
   assert.deepEqual(propagateFloatingDescriptions([]), []);
   assert.deepEqual(propagateFloatingDescriptions(null), []);
+});
+
+// === Gallerie ACCESSORI STANDARD a colonne → Dotazioni (pagg. 52/63/64) ===
+
+test('stripLayoutNoise: scarta le pseudo-etichette PC / 4x / Diametro Cerchio', () => {
+  assert.equal(stripLayoutNoise('PC'), '');
+  assert.equal(stripLayoutNoise('4x'), '');
+  assert.equal(stripLayoutNoise('Diametro Cerchio 11” - 25”'), '');
+  assert.equal(stripLayoutNoise('Diametro Ruota 400'), '');
+  // una vera descrizione non viene toccata
+  assert.equal(stripLayoutNoise('Pistoletta di gonfiaggio'), 'Pistoletta di gonfiaggio');
+});
+
+test('detectSectionColumns: banner a due colonne → due marker con fascia x', () => {
+  const items = [
+    { str: 'ACCESSORI', x0: 24, x1: 110, top: 394 },
+    { str: 'STANDARD',  x0: 112, x1: 141, top: 394 },
+    { str: 'OPTIONAL',  x0: 426, x1: 477, top: 394 }
+  ];
+  const cols = detectSectionColumns(items);
+  assert.equal(cols.length, 2);
+  const std = cols.find(c => c.text === 'ACCESSORI STANDARD');
+  const opt = cols.find(c => c.text === 'OPTIONAL');
+  assert.ok(std && opt);
+  assert.ok(std.xMin < opt.xMin);        // STANDARD a sinistra
+});
+
+test('detectSectionColumns: riconosce la variante "ACCESSORI STANDARD PER COD. NNN"', () => {
+  const items = [
+    { str: 'ACCESSORI STANDARD PER COD. 03100103', x0: 27, x1: 224, top: 409 },
+    { str: 'OPTIONAL', x0: 475, x1: 526, top: 458 }
+  ];
+  const cols = detectSectionColumns(items);
+  assert.ok(cols.some(c => c.text === 'ACCESSORI STANDARD' && Math.round(c.xMin) === 27));
+  assert.ok(cols.some(c => c.text === 'OPTIONAL'));
+});
+
+test('isInAccStandardColumn: colonna sinistra → true, colonna OPTIONAL destra → false', () => {
+  const cols = [
+    { text: 'ACCESSORI STANDARD', top: 394, xMin: 24, xMax: 141 },
+    { text: 'OPTIONAL', top: 394, xMin: 426, xMax: 477 }
+  ];
+  assert.equal(isInAccStandardColumn(cols, 477, 255), true);   // codice a sinistra
+  assert.equal(isInAccStandardColumn(cols, 477, 480), false);  // codice sotto OPTIONAL
+  assert.equal(isInAccStandardColumn(cols, 300, 255), false);  // banner non ancora sopra
+  assert.equal(isInAccStandardColumn([], 477, 255), false);
+});
+
+test('classifyDidascalie: codice-galleria (hint _boxAccStandard) senza prezzo → Dotazioni, desc vuota', () => {
+  const rows = [
+    { codice: '90000040', descrizione: '',   prezzo: null, pagina: '52', review_flag: 'PREZZO_MANCANTE', sezione: 'S1', _boxAccStandard: true },
+    { codice: '90000041', descrizione: 'PC', prezzo: null, pagina: '63', review_flag: 'PREZZO_MANCANTE', sezione: 'S2', _boxAccStandard: true }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(mainRows.length, 0);
+  assert.deepEqual(dotazioni.map(d => d.codice).sort(), ['90000040', '90000041']);
+  assert.ok(dotazioni.every(d => d.descrizione === '' && d.review_flag === 'CODICE_DIDASCALIA'));
+});
+
+test('classifyDidascalie: il box-hint scarta la didascalia-galleria ma la riga prezzata sopravvive', () => {
+  // Un codice che compare come didascalia in galleria (p.52) E come riga prezzata
+  // altrove (p.54): l'occorrenza-galleria è scartata, quella prezzata resta.
+  const rows = [
+    { codice: '90000042', descrizione: '',      prezzo: null, pagina: '52', review_flag: 'PREZZO_MANCANTE', sezione: 'S1', _boxAccStandard: true },
+    { codice: '90000042', descrizione: 'Rullo', prezzo: 300,  pagina: '54', review_flag: '',                sezione: 'ACC' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);       // ha una riga prezzata → resta nel Listino
+  assert.equal(mainRows.length, 1);
+  assert.equal(mainRows[0].pagina, '54');
 });
