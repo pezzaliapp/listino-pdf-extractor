@@ -1,35 +1,153 @@
 // PDF parsing utilities for v4: code/description/price/page extraction with multi-line support.
 
 /**
- * Accept Italian price formats: "3.940,00", "880,00", "1.500", "1.500,00".
+ * Accept Italian price formats: "3.940,00", "880,00", "1.500", "1.500,00",
+ * e — nuovo — "1100,00" (il punto delle migliaia perso dall'estrazione pdf.js,
+ * caso reale pagg. 16-17 listino Cormach: "1.000,00" → item "1000,00").
  * Reject:
- *   - "21.100.057" (3+ dots without comma → product code, not a price)
- *   - "21100076"   (8+ digits without separators → product code)
- *   - "36", "880"  (bare integers without separator → could be quantity, year, model — treat as not-a-price)
+ *   - "21.100.057" (2+ dots without comma → product code, not a price)
+ *   - "21100076"   (digits without separators → product code)
+ *   - "36", "880"  (bare integers without separator → could be quantity, year, model)
+ *   - "7,5"        (1 sola cifra decimale → peso/misura da tabella tecnica, non prezzo)
  *   - "abc", ""
  */
 export function parsePriceString(s) {
   if (typeof s !== 'string') return null;
   const t = s.trim().replace(/[€\s]/g, '');
   if (!t) return null;
-  if (!/^\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$/.test(t)) return null;
+  const canonical = /^\d{1,3}(?:\.\d{3})+(?:,\d{2})?$/.test(t); // con punto migliaia
+  const small     = /^\d{1,3},\d{2}$/.test(t);                  // sotto 1.000
+  const noDots    = /^\d{4,9},\d{2}$/.test(t);                  // punto migliaia perso dal PDF
+  if (!canonical && !small && !noDots) return null;
   const dotGroups = t.split('.').length - 1;
-  if (dotGroups >= 2 && !t.includes(',')) return null;
-  if (dotGroups === 0 && !t.includes(',')) return null;
+  if (dotGroups >= 2 && !t.includes(',')) return null;          // "21.100.057" = codice
   const n = Number(t.replace(/\./g, '').replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 }
 
-export function isProductCode(s) {
-  if (typeof s !== 'string') return false;
-  return /^\d{6,9}$/.test(s.replace(/[\s.]/g, ''));
+/**
+ * Frammenti di prezzo spezzati da pdf.js ("1." + "100,00", "1" + ".100,00",
+ * "1.100" + ",00"): possono essere ricomposti solo se il taglio cade su un
+ * separatore (A termina con '.' oppure B inizia con '.' o ',') e la
+ * concatenazione è un prezzo valido. Così "36" + "880,00" (quantità+prezzo)
+ * non viene mai unito ("36880,00" non parserebbe comunque).
+ */
+export function canJoinPriceFragments(a, b) {
+  const A = String(a ?? '').trim();
+  const B = String(b ?? '').trim();
+  if (!A || !B) return false;
+  if (!/^[\d.]+$/.test(A) || !/^[.,\d]+$/.test(B)) return false;
+  if (!(/\.$/.test(A) || /^[.,]/.test(B))) return false;
+  return parsePriceString(A + B) !== null;
 }
 
-/** Una riga è "riga prodotto" se ha almeno un codice. (Il prezzo può anche
-    arrivare dalla riga successiva, vedi joinMultiLineRows.) */
+/** Ricompone i prezzi spezzati in un array di token (fase pre-parsing).
+    Gestisce anche il taglio in 3 pezzi "1" + "." + "100,00", dove nessuna
+    coppia da sola forma un prezzo valido. */
+export function recomposeSplitPriceTokens(tokens) {
+  if (!Array.isArray(tokens)) return [];
+  const out = tokens.slice();
+  let i = 0;
+  const frag = t => /^[.,\d]+$/.test(String(t ?? '').trim());
+  while (i < out.length - 1) {
+    const A = String(out[i]).trim();
+    const B = String(out[i + 1]).trim();
+    if (canJoinPriceFragments(A, B)) {
+      out.splice(i, 2, A + B);
+      continue; // riprova sulla stessa posizione (cascate "1." "100" ",00")
+    }
+    if (i + 2 < out.length) {
+      const C = String(out[i + 2]).trim();
+      if (/^[\d.]+$/.test(A) && frag(B) && frag(C) &&
+          (/\.$/.test(A) || /^[.,]/.test(B)) &&
+          parsePriceString(A + B + C) !== null) {
+        out.splice(i, 3, A + B + C);
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Ricompone i prezzi spezzati a livello di text item pdf.js: unisce coppie di
+ * item numerici sulla stessa riga visiva (|Δtop| ≤ 2) e orizzontalmente
+ * adiacenti (gap x ∈ [-1, 4]pt) quando canJoinPriceFragments approva.
+ * Idempotente; iterativo, ricompone anche cascate risolvibili a coppie
+ * ("1."+"100"+",00"). Il taglio "1"+"."+"100,00" è coperto solo a livello
+ * token da recomposeSplitPriceTokens.
+ */
+export function coalesceSplitPriceItems(items) {
+  if (!Array.isArray(items)) return [];
+  let arr = items.filter(Boolean);
+  let guard = 0;
+  let changed = true;
+  while (changed && guard++ < 6) {
+    changed = false;
+    const sorted = [...arr].sort((a, b) =>
+      (Number(a.top) - Number(b.top)) || (Number(a.x0) - Number(b.x0)));
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const a = sorted[i], b = sorted[i + 1];
+      const ta = Number(a.top), tb = Number(b.top);
+      if (!Number.isFinite(ta) || !Number.isFinite(tb) || Math.abs(ta - tb) > 2) continue;
+      const gap = Number(b.x0) - Number(a.x1);
+      if (!Number.isFinite(gap) || gap < -1 || gap > 4) continue;
+      if (!canJoinPriceFragments(a.str, b.str)) continue;
+      const merged = { ...a, str: String(a.str).trim() + String(b.str).trim(), x1: b.x1 };
+      arr = arr.filter(it => it !== a && it !== b);
+      arr.push(merged);
+      changed = true;
+      break;
+    }
+  }
+  return arr;
+}
+
+/**
+ * Classifica un token come codice articolo con livello di confidenza.
+ *   'high' → numerico 6-13 cifre (anche con punti/spazi interni o '*' finale:
+ *            "21.100.057", "25100310*", EAN-13).
+ *   'low'  → numerico a 5 cifre, oppure alfanumerico maiuscolo con cifre e
+ *            separatori -/., es. "FG192/PS2", "ABC-1234". Le righe con codice
+ *            'low' vengono emesse ma flaggate CHECK_CODICE (segnalare, non
+ *            indovinare).
+ *   null   → non è un codice. Esclusi esplicitamente: prezzi, numero+unità
+ *            ("30000N", "80AH"), sigle-modello ("F535S", "AL40", "2450N"),
+ *            dimensioni ("16X12X8"), anni a 4 cifre.
+ */
+export function codeConfidence(s) {
+  if (typeof s !== 'string') return null;
+  let t = s.trim().replace(/\*+$/, ''); // '*' finale = rimando a nota, non parte del codice
+  if (!t) return null;
+  const digitsOnly = t.replace(/[\s.]/g, '');
+  if (/^\d+$/.test(digitsOnly)) {
+    if (digitsOnly.length >= 6 && digitsOnly.length <= 13) return 'high';
+    if (digitsOnly.length === 5) return 'low';
+    return null;
+  }
+  if (!/^[A-Z0-9][A-Z0-9./-]{2,14}[A-Z0-9]$/.test(t)) return null;
+  if (!/\d/.test(t) || !/[A-Z]/.test(t)) return null;
+  if (parsePriceString(t) !== null) return null;
+  if (/^\d+(?:[.,]\d+)?[A-Z]{1,3}$/.test(t)) return null;   // "30000N", "2450N", "80AH"
+  if (/\d[VAW][-/]/.test(t) || /\d(?:HZ|KW|RPM|BAR|PH)$/.test(t)) return null; // "230V-50/60HZ", "12V/24V"
+  if (/^[A-Z]{1,2}\d+[A-Z]{0,3}$/.test(t)) return null;     // sigle modello "F535S", "AL40"
+  if (/\dX\d/.test(t)) return null;                          // dimensioni "16X12X8"
+  return 'low';
+}
+
+export function isProductCode(s) {
+  return codeConfidence(s) !== null;
+}
+
+/** Una riga è "riga prodotto" se ha almeno un codice 'high', oppure se il
+    PRIMO token è un codice 'low' (nei listini il codice apre la riga: così
+    "FG192/PS2 ..." conta, ma un "2000S" in mezzo alla descrizione no).
+    (Il prezzo può anche arrivare dalla riga successiva, vedi joinMultiLineRows.) */
 export function hasProductCode(tokens) {
   if (!Array.isArray(tokens)) return false;
-  return tokens.some(t => isProductCode(t));
+  if (tokens.some(t => codeConfidence(t) === 'high')) return true;
+  return tokens.length > 0 && codeConfidence(tokens[0]) === 'low';
 }
 
 /** Una riga è "valida e completa" se ha codice E prezzo. */
@@ -41,7 +159,10 @@ export function isCompleteProductRow(tokens) {
 }
 
 function normalizeCode(token) {
-  return String(token || '').replace(/[\s.]/g, '');
+  const t = String(token || '').trim().replace(/\*+$/, '');
+  // codici numerici: rimuovi punti/spazi interni ("21.100.057" → "21100057");
+  // codici alfanumerici: mantieni i separatori, sono parte del codice.
+  return /^[\d\s.]+$/.test(t) ? t.replace(/[\s.]/g, '') : t;
 }
 
 function lastValidPrice(tokens) {
@@ -66,29 +187,40 @@ function joinTokens(tokens) {
  */
 export function joinMultiLineRows(linee, pagina) {
   const rows = [];
+  // Ricomposizione preventiva dei prezzi spezzati ("1." "100,00" → "1.100,00"):
+  // deve avvenire PRIMA di ogni decisione, altrimenti lastValidPrice si ferma
+  // sul frammento di destra e perde le migliaia.
+  const srcLines = (Array.isArray(linee) ? linee : []).map(L => ({
+    tokens: recomposeSplitPriceTokens((L && L.tokens) || [])
+  }));
   let i = 0;
-  while (i < linee.length) {
-    const L = linee[i];
-    const tk = (L && L.tokens) || [];
+  while (i < srcLines.length) {
+    const tk = srcLines[i].tokens;
 
     if (!hasProductCode(tk)) { i += 1; continue; }
 
-    const codeIdx = tk.findIndex(t => isProductCode(t));
+    let codeIdx = tk.findIndex(t => codeConfidence(t) === 'high');
+    let lowCode = false;
+    if (codeIdx === -1) { codeIdx = 0; lowCode = true; } // hasProductCode garantisce tokens[0] 'low'
     const codice = normalizeCode(tk[codeIdx]);
     const pageStr = String(pagina);
+    const baseFlags = lowCode ? ['CHECK_CODICE'] : [];
 
     if (isCompleteProductRow(tk)) {
       const priceInfo = lastValidPrice(tk);
       const desc = joinTokens(tk.slice(codeIdx + 1, priceInfo.idx));
-      rows.push({ codice, descrizione: desc, prezzo: priceInfo.value, pagina: pageStr, review_flag: '' });
+      const flags = [...baseFlags];
+      // Frammento orfano con punto finale subito prima del prezzo scelto
+      // ("1." "10,00" non ricomponibile): prezzo probabilmente monco → segnala.
+      const prev = priceInfo.idx > 0 ? String(tk[priceInfo.idx - 1]) : '';
+      if (/^\d{1,3}(?:\.\d{3})*\.$/.test(prev)) flags.push('CHECK_PREZZO');
+      rows.push({ codice, descrizione: desc, prezzo: priceInfo.value, pagina: pageStr, review_flag: flags.join(';') });
       i += 1;
       continue;
     }
 
-    const L1 = (i + 1 < linee.length) ? linee[i + 1] : null;
-    const L2 = (i + 2 < linee.length) ? linee[i + 2] : null;
-    const t1 = L1 ? ((L1.tokens) || []) : null;
-    const t2 = L2 ? ((L2.tokens) || []) : null;
+    const t1 = (i + 1 < srcLines.length) ? srcLines[i + 1].tokens : null;
+    const t2 = (i + 2 < srcLines.length) ? srcLines[i + 2].tokens : null;
     const t1Price = t1 ? lastValidPrice(t1) : null;
     const t2Price = t2 ? lastValidPrice(t2) : null;
     const t1HasCode = t1 ? hasProductCode(t1) : false;
@@ -99,7 +231,7 @@ export function joinMultiLineRows(linee, pagina) {
       const descA = joinTokens(tk.slice(codeIdx + 1));
       const descB = joinTokens(t1.slice(0, t1Price.idx));
       const desc = `${descA} ${descB}`.replace(/\s+/g, ' ').trim();
-      rows.push({ codice, descrizione: desc, prezzo: t1Price.value, pagina: pageStr, review_flag: '' });
+      rows.push({ codice, descrizione: desc, prezzo: t1Price.value, pagina: pageStr, review_flag: baseFlags.join(';') });
       i += 2;
       continue;
     }
@@ -110,14 +242,14 @@ export function joinMultiLineRows(linee, pagina) {
       const descB = joinTokens(t1);
       const descC = joinTokens(t2.slice(0, t2Price.idx));
       const desc = `${descA} ${descB} ${descC}`.replace(/\s+/g, ' ').trim();
-      rows.push({ codice, descrizione: desc, prezzo: t2Price.value, pagina: pageStr, review_flag: '' });
+      rows.push({ codice, descrizione: desc, prezzo: t2Price.value, pagina: pageStr, review_flag: baseFlags.join(';') });
       i += 3;
       continue;
     }
 
     // Caso C: codice senza prezzo determinabile → CHECK
     const desc = joinTokens(tk.slice(codeIdx + 1));
-    rows.push({ codice, descrizione: desc, prezzo: null, pagina: pageStr, review_flag: 'CHECK' });
+    rows.push({ codice, descrizione: desc, prezzo: null, pagina: pageStr, review_flag: ['CHECK', ...baseFlags].join(';') });
     i += 1;
   }
   return rows;
@@ -167,7 +299,7 @@ export function aggregateAcrossPages(rowsByPage) {
 export function computeColumnBands(items, pageWidth = Infinity) {
   if (!Array.isArray(items) || !items.length) return null;
   const priceRe = /^\d{1,3}(?:\.\d{3})*,\d{2}(?:\s*€)?$/;
-  const codeRe = /^\d{8}$/;
+  const codeRe = /^\d{6,13}\*?$/;
   const prices = [];
   const codes = [];
   for (const it of items) {
@@ -201,7 +333,10 @@ function _modeOfRounded(values) {
   let modal = ints[0];
   let best = 0;
   for (const [v, n] of counts.entries()) {
-    if (n > best) { best = n; modal = v; }
+    // A parità di frequenza vince il valore più piccolo: nelle pagine con
+    // codici sparsi (es. box OPTIONAL a destra) la colonna codici vera è
+    // quella più a sinistra; il primo-visto renderebbe le fasce instabili.
+    if (n > best || (n === best && v < modal)) { best = n; modal = v; }
   }
   return modal;
 }
@@ -423,14 +558,44 @@ export function normalizePdfjsItem(rawItem, pageHeight) {
  */
 export function extractAnchors(items) {
   if (!Array.isArray(items)) return [];
-  const out = [];
+  const cand = [];
   for (const it of items) {
     if (!it || typeof it.str !== 'string') continue;
     const t = it.str.trim();
-    if (!/^\d{8}$/.test(t)) continue;
+    const confidence = codeConfidence(t);
+    if (!confidence) continue;
     const top = Number(it.top);
     if (!Number.isFinite(top)) continue;
-    out.push({ codice: t, top, item: it });
+    cand.push({ codice: normalizeCode(t), top, item: it, confidence });
+  }
+  const high = cand.filter(c => c.confidence === 'high');
+  const low = cand.filter(c => c.confidence === 'low');
+  const out = [...high];
+  // Gating posizionale: i candidati 'low' ("FG192/PS2", 5 cifre) diventano
+  // anchor solo se allineati alla colonna codici — cioè alla x0 modale degli
+  // anchor 'high', o in assenza di questi alla x0 modale condivisa da almeno
+  // 2 candidati 'low'. Evita che sigle in mezzo alle descrizioni spezzino le
+  // bande. Le righe con anchor 'low' escono comunque flaggate CHECK_CODICE.
+  if (low.length) {
+    const xs = arr => arr.map(c => Number(c.item && c.item.x0)).filter(Number.isFinite);
+    let xRef = null;
+    const hx = xs(high);
+    if (hx.length) {
+      xRef = _modeOfRounded(hx);
+    } else {
+      const lx = xs(low).map(v => Math.round(v));
+      const counts = new Map();
+      for (const v of lx) counts.set(v, (counts.get(v) || 0) + 1);
+      for (const [v, n] of counts.entries()) {
+        if (n >= 2 && (xRef === null || n > counts.get(xRef))) xRef = v;
+      }
+    }
+    if (xRef !== null) {
+      for (const c of low) {
+        const x0 = Number(c.item && c.item.x0);
+        if (Number.isFinite(x0) && Math.abs(x0 - xRef) <= 6) out.push(c);
+      }
+    }
   }
   out.sort((a, b) => a.top - b.top);
   return out;
@@ -492,25 +657,45 @@ export function classifyXBand(item, columnBands) {
  */
 export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
   if (!anchor) return null;
-  const items = Array.isArray(bandItems) ? bandItems : [];
+  // Ricomposizione dei prezzi spezzati DENTRO la banda: senza, "1." "100,00"
+  // farebbe scegliere 100 perdendo le migliaia. Il coalescing non tocca mai
+  // l'item-anchor (un codice non è mai un frammento di prezzo).
+  const items = coalesceSplitPriceItems(Array.isArray(bandItems) ? bandItems : []);
   const sorted = [...items].sort((a, b) => (a.top - b.top) || (a.x0 - b.x0));
   const descItems = [];
   let prezzo = null;
+  let prezzoTop = null;
   let multiPrice = false;
+  let priceFragmentLeftover = false;
 
   for (const it of sorted) {
     if (it === anchor.item) continue;
     const t = String(it.str || '').trim();
     if (!t) continue;
-    if (/^\d{8}$/.test(t)) continue; // un altro anchor finito qui per sbaglio
+    if (/^\d{6,13}\*?$/.test(t)) continue; // un altro anchor finito qui per sbaglio
 
     if (columnBands) {
-      const cls = classifyXBand(it, columnBands);
+      let cls = classifyXBand(it, columnBands);
+      // I prezzi sono allineati a destra: i più lunghi ("1.000,00") iniziano
+      // a sinistra della banda calcolata sulla moda delle x0 e finirebbero in
+      // 'descrizione' o 'code'. Se l'item parsa come prezzo e la sua x1 è sul
+      // bordo destro della colonna prezzi, è un prezzo.
+      const xPR = Number(columnBands._anchors && columnBands._anchors.xPriceRight);
+      if (cls !== 'prezzo' && Number.isFinite(xPR) &&
+          Math.abs(Number(it.x1) - xPR) <= 12 && parsePriceString(t) !== null) {
+        cls = 'prezzo';
+      }
       if (cls === 'prezzo') {
         const v = parsePriceString(t);
         if (v !== null) {
-          if (prezzo === null) prezzo = v;
+          if (prezzo === null) { prezzo = v; prezzoTop = Number(it.top); }
           else if (v !== prezzo) multiPrice = true;
+        } else if (/^[\d.,]+$/.test(t) && /[.,]/.test(t)) {
+          // frammento numerico non ricomponibile nella colonna prezzo
+          // (contiene un separatore: "1.", ",00"): il prezzo scelto
+          // potrebbe essere monco → segnalare. Gli interi nudi ("1550")
+          // sono misure di tabelle tecniche, non frammenti.
+          priceFragmentLeftover = true;
         }
       } else if (cls === 'descrizione') {
         descItems.push(it);
@@ -522,6 +707,8 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
       if (v !== null) {
         if (prezzo === null) prezzo = v;
         else if (v !== prezzo) multiPrice = true;
+      } else if (/^\d{1,3}(?:\.\d{3})*\.$/.test(t)) {
+        priceFragmentLeftover = true; // orfano tipo "1." → non inquinare la descrizione
       } else {
         descItems.push(it);
       }
@@ -537,17 +724,30 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  let review_flag = '';
-  if (multiPrice) review_flag = 'MULTI_PRICE';
-  else if (prezzo === null) review_flag = 'PREZZO_MANCANTE';
+  const flags = [];
+  if (multiPrice) flags.push('MULTI_PRICE');
+  else if (prezzo === null) flags.push('PREZZO_MANCANTE');
+  else if (priceFragmentLeftover) flags.push('CHECK_PREZZO');
+  if (anchor.confidence === 'low') flags.push('CHECK_CODICE');
+  const review_flag = flags.join(';');
 
-  return {
+  const row = {
     codice: anchor.codice,
     descrizione,
     prezzo,
     pagina: String(pageNum),
     review_flag
   };
+  // Hint interno per mergeMultiCodeRows: prezzo che "galleggia" sopra la
+  // riga dell'anchor = contenuto di una cella verticale condivisa con la
+  // riga precedente (rowspan). Non finisce nell'Excel.
+  // Proprietà normale (le clonazioni {...row} a valle devono conservarla);
+  // viene strippata insieme a yAnchor prima dell'output finale.
+  if (prezzo !== null && Number.isFinite(prezzoTop) &&
+      Number.isFinite(Number(anchor.top)) && prezzoTop < Number(anchor.top) - 4) {
+    row._prezzoGalleggiante = true;
+  }
+  return row;
 }
 
 // === M6 — Section detection ===
@@ -694,6 +894,36 @@ export function mergeMultiCodeRows(rows) {
     next.prezzo = prev.prezzo;
     next.review_flag = 'MERGED_FROM_PREV';
   }
+  // Passata simmetrica: cella verticale unita in cui prezzo (ed eventuale
+  // descrizione) cadono nella banda del codice INFERIORE, lasciando vuota la
+  // riga sopra (es. 20100202 / 20100326* a pag. 36 del listino Cormach).
+  // Guardie: la riga sopra deve essere completamente vuota, le due righe
+  // devono appartenere alla stessa sezione (evita che un codice-etichetta di
+  // "ACCESSORI STANDARD" rubi il prezzo alla tabella prodotti sottostante) e
+  // la distanza verticale deve essere quella di una cella condivisa (< 70pt).
+  for (let i = out.length - 2; i >= 0; i--) {
+    const prev = out[i];
+    const next = out[i + 1];
+    if (!prev || !next) continue;
+    const dy = Math.abs(Number(next.yAnchor) - Number(prev.yAnchor));
+    if (!Number.isFinite(dy) || dy >= 70) continue;
+    if (prev.descrizione && String(prev.descrizione).length > 0) continue;
+    if (prev.prezzo !== null && prev.prezzo !== undefined) continue;
+    if (next.prezzo === null || next.prezzo === undefined) continue;
+    // Solo vere celle condivise. Due firme accettate:
+    //  a) next senza descrizione (tutto il contenuto è finito altrove);
+    //  b) next con contenuto, ma con prezzo "galleggiante" sopra la propria
+    //     riga (rowspan centrato tra i due codici, es. 25100044/25100045).
+    // Se next è una riga-prodotto completa col prezzo sulla propria riga,
+    // prev è più probabilmente un codice-etichetta (es. box OPTIONAL) che
+    // le sta sopra per caso: rubare il prezzo sarebbe indovinare.
+    const nextHasDesc = next.descrizione && String(next.descrizione).length > 0;
+    if (nextHasDesc && !next._prezzoGalleggiante) continue;
+    if ((prev.sezione ?? '') !== (next.sezione ?? '')) continue;
+    prev.prezzo = next.prezzo;
+    if (nextHasDesc) prev.descrizione = next.descrizione;
+    prev.review_flag = 'MERGED_FROM_NEXT';
+  }
   return out;
 }
 
@@ -728,6 +958,11 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     let items = rawItems
       .map(it => normalizePdfjsItem(it, pageHeight))
       .filter(Boolean);
+
+    // Ricomposizione prezzi spezzati da pdf.js ("1." + "100,00" → "1.100,00").
+    // Va fatta prima di anchor e bande: i frammenti non sono mai codici,
+    // quindi extractAnchors non ne è influenzato.
+    items = coalesceSplitPriceItems(items);
 
     // Anchor extraction: M3 (length≤2, width<12pt) and M9 (SIDE_NOTE_PATTERNS)
     // by construction non possono rimuovere codici 8 cifre, quindi una sola
@@ -765,7 +1000,7 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     // M5 — merge multi-codice intra-page
     const mergedPageRows = mergeMultiCodeRows(pageRows);
     for (const r of mergedPageRows) {
-      const { yAnchor: _y, ...clean } = r;
+      const { yAnchor: _y, _prezzoGalleggiante: _pg, ...clean } = r;
       allRows.push(clean);
     }
   }

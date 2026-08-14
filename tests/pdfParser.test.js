@@ -236,20 +236,21 @@ test('normalizePdfjsItem: ritorna null su input invalido', () => {
   assert.equal(normalizePdfjsItem({ str: 'foo', transform: [1, 2, 3] }, 800), null);
 });
 
-test('extractAnchors: filtra solo codici a 8 cifre, ordina per top crescente', () => {
+test('extractAnchors: codici numerici 6-13 cifre, ordina per top crescente', () => {
   const items = [
     { str: '21100070', top: 215 },
     { str: '00100208', top: 100 },
     { str: 'Cono',     top: 110 },
-    { str: '12345',    top: 220 }, // troppo corto
+    { str: '12345',    top: 220 }, // 5 cifre = low confidence: senza x0 allineata non diventa anchor
     { str: '21100375', top: 180 },
-    { str: '123456789',top: 300 }  // 9 cifre, no
+    { str: '123456789',top: 300 }  // 9 cifre: ora valido (v5.1 — prima era escluso a torto)
   ];
   const out = extractAnchors(items);
-  assert.equal(out.length, 3);
+  assert.equal(out.length, 4);
   assert.equal(out[0].codice, '00100208');
   assert.equal(out[1].codice, '21100375');
   assert.equal(out[2].codice, '21100070');
+  assert.equal(out[3].codice, '123456789');
 });
 
 test('extractAnchors: ignora item senza top o non-string', () => {
@@ -543,6 +544,45 @@ test('mergeMultiCodeRows: caso classico §P5 — prev desc+prezzo, next vuoto, d
   assert.equal(out[1].review_flag, 'MERGED_FROM_PREV');
 });
 
+test('mergeMultiCodeRows: backward — cella condivisa con prezzo galleggiante (pag 81, 25100044/45)', () => {
+  // Il rowspan mette descrizione e prezzo (350) centrati tra i due codici:
+  // tutto cade nella banda del secondo per mezzo punto. Il prezzo però sta
+  // SOPRA la riga dell'anchor di 25100045 (hint _prezzoGalleggiante) → la
+  // riga vuota sopra riceve prezzo e descrizione, flag MERGED_FROM_NEXT.
+  const rows = [
+    { codice: '25100044', descrizione: '', prezzo: null, pagina: '81', review_flag: 'PREZZO_MANCANTE', sezione: 'ACCESSORI', yAnchor: 536 },
+    { codice: '25100045', descrizione: 'Kit di cablaggio, 1mt.', prezzo: 350, pagina: '81', review_flag: '', sezione: 'ACCESSORI', yAnchor: 562, _prezzoGalleggiante: true }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[0].prezzo, 350);
+  assert.equal(out[0].descrizione, 'Kit di cablaggio, 1mt.');
+  assert.equal(out[0].review_flag, 'MERGED_FROM_NEXT');
+  assert.equal(out[1].prezzo, 350); // la sorgente resta invariata
+});
+
+test('mergeMultiCodeRows: backward NON scatta verso una riga-prodotto completa (box OPTIONAL pag 57)', () => {
+  // 23100209 è il codice-etichetta del box OPTIONAL: sta sopra la riga
+  // completa di 03100074 (prezzo 16.750 sulla propria riga, nessun hint).
+  // Rubare quel prezzo sarebbe indovinare → resta PREZZO_MANCANTE.
+  const rows = [
+    { codice: '23100209', descrizione: '', prezzo: null, pagina: '57', review_flag: 'PREZZO_MANCANTE', sezione: 'WR 328A > OPTIONAL', yAnchor: 600 },
+    { codice: '03100074', descrizione: 'WR 328A 1ph 230V-50/60Hz', prezzo: 16750, pagina: '57', review_flag: '', sezione: 'WR 328A > OPTIONAL', yAnchor: 669 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[0].prezzo, null);
+  assert.equal(out[0].review_flag, 'PREZZO_MANCANTE');
+});
+
+test('mergeMultiCodeRows: backward — cella condivisa con entrambe le descrizioni vuote (pag 36)', () => {
+  const rows = [
+    { codice: '20100202', descrizione: '', prezzo: null, pagina: '36', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 222 },
+    { codice: '20100326', descrizione: '', prezzo: 150, pagina: '36', review_flag: '', sezione: 'S', yAnchor: 250 }
+  ];
+  const out = mergeMultiCodeRows(rows);
+  assert.equal(out[0].prezzo, 150);
+  assert.equal(out[0].review_flag, 'MERGED_FROM_NEXT');
+});
+
 test('mergeMultiCodeRows: NON merge se r_{i+1} ha descrizione propria (caso pag 54)', () => {
   // 20100112 e 20100362: stessa descrizione "Kit radiocomando" ma prezzi diversi
   // (3.100 / 5.800). Entrambi hanno descrizione + prezzo. dy<35 ma il check
@@ -750,4 +790,176 @@ test('hasProductCode vs isCompleteProductRow', () => {
   const full = ['00100208', 'PUMA', 'CE', '1ph', '230V', '50-60Hz', '3.940,00'];
   assert.equal(hasProductCode(full), true);
   assert.equal(isCompleteProductRow(full), true);
+});
+
+// === v5.1 — prezzi spezzati / punto migliaia perso ===
+
+import {
+  canJoinPriceFragments, recomposeSplitPriceTokens, coalesceSplitPriceItems,
+  codeConfidence, joinMultiLineRows as _jml
+} from '../src/pdfParser.js';
+
+test('parsePriceString v5.1: punto migliaia perso e decimali obbligatori', () => {
+  assert.equal(parsePriceString('1000,00'), 1000);   // caso reale pag. 16 Cormach
+  assert.equal(parsePriceString('1100,00'), 1100);   // caso reale pag. 17 Cormach
+  assert.equal(parsePriceString('33200,00'), 33200);
+  assert.equal(parsePriceString('7,5'), null);       // peso da tabella tecnica, non prezzo
+  assert.equal(parsePriceString('188,5'), null);
+  assert.equal(parsePriceString('1500'), null);      // intero nudo: invariato
+  assert.equal(parsePriceString('21.100.057'), null);
+});
+
+test('canJoinPriceFragments: unisce solo tagli su separatore', () => {
+  assert.equal(canJoinPriceFragments('1.', '100,00'), true);
+  assert.equal(canJoinPriceFragments('1', '.100,00'), true);
+  assert.equal(canJoinPriceFragments('1.100', ',00'), true);
+  assert.equal(canJoinPriceFragments('22', '.950,00'), true);
+  assert.equal(canJoinPriceFragments('36', '880,00'), false);  // quantità + prezzo
+  assert.equal(canJoinPriceFragments('1.500', '65,00'), false); // due prezzi distinti
+  assert.equal(canJoinPriceFragments('', '100,00'), false);
+});
+
+test('recomposeSplitPriceTokens: ricompone e non tocca il resto', () => {
+  assert.deepEqual(
+    recomposeSplitPriceTokens(['Distanziale', 'per', 'furgoni', '1.', '100,00']),
+    ['Distanziale', 'per', 'furgoni', '1.100,00']);
+  assert.deepEqual(recomposeSplitPriceTokens(['1', '.100,00']), ['1.100,00']);
+  assert.deepEqual(recomposeSplitPriceTokens(['1', '.', '100,00']), ['1.100,00']); // 3 pezzi
+  assert.deepEqual(recomposeSplitPriceTokens(['36', 'mesi', '880,00']), ['36', 'mesi', '880,00']);
+});
+
+test('joinMultiLineRows: il prezzo spezzato non perde le migliaia (1.100 ≠ 100)', () => {
+  const out = _jml([{ tokens: ['21100304', 'Distanziale', 'e', 'cono', '1.', '100,00'] }], 17);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].prezzo, 1100);
+  assert.equal(out[0].review_flag, '');
+});
+
+test('joinMultiLineRows: variante "1" + ".100,00" non finisce più in CHECK', () => {
+  const out = _jml([{ tokens: ['21100304', 'Distanziale', '1', '.100,00'] }], 17);
+  assert.equal(out[0].prezzo, 1100);
+  assert.equal(out[0].review_flag, '');
+});
+
+test('joinMultiLineRows: frammento orfano non ricomponibile → CHECK_PREZZO', () => {
+  // "1." + "10,00" → "1.10,00" non è un prezzo valido: resta orfano, si segnala
+  const out = _jml([{ tokens: ['21100304', 'Distanziale', '1.', '10,00'] }], 17);
+  assert.equal(out[0].prezzo, 10);
+  assert.match(out[0].review_flag, /CHECK_PREZZO/);
+});
+
+test('coalesceSplitPriceItems: unisce frammenti adiacenti sulla stessa riga', () => {
+  const items = [
+    { str: '21100304', x0: 100, x1: 144, top: 300 },
+    { str: 'Distanziale', x0: 165, x1: 230, top: 300 },
+    { str: '1.', x0: 470, x1: 478, top: 300 },
+    { str: '100,00', x0: 479, x1: 510, top: 300 }
+  ];
+  const out = coalesceSplitPriceItems(items);
+  assert.equal(out.length, 3);
+  const merged = out.find(it => it.str === '1.100,00');
+  assert.ok(merged);
+  assert.equal(merged.x0, 470);
+  assert.equal(merged.x1, 510);
+});
+
+test('coalesceSplitPriceItems: NON unisce frammenti su righe o colonne diverse', () => {
+  const farApart = coalesceSplitPriceItems([
+    { str: '1.', x0: 200, x1: 208, top: 300 },
+    { str: '100,00', x0: 479, x1: 510, top: 300 } // gap 271pt: colonne diverse
+  ]);
+  assert.equal(farApart.length, 2);
+  const otherLine = coalesceSplitPriceItems([
+    { str: '1.', x0: 470, x1: 478, top: 300 },
+    { str: '100,00', x0: 479, x1: 510, top: 320 } // riga diversa
+  ]);
+  assert.equal(otherLine.length, 2);
+});
+
+// === v5.1 — pattern codici allargato ===
+
+test('codeConfidence: tier di confidenza', () => {
+  assert.equal(codeConfidence('21100076'), 'high');
+  assert.equal(codeConfidence('1234567890123'), 'high'); // 13 cifre (EAN-13)
+  assert.equal(codeConfidence('123456789'), 'high');     // 10+ cifre non più scartati... 9 qui
+  assert.equal(codeConfidence('25100310*'), 'high');     // asterisco-nota (pag. 69 Cormach)
+  assert.equal(codeConfidence('12345'), 'low');          // 5 cifre
+  assert.equal(codeConfidence('FG192/PS2'), 'low');      // alfanumerico fornitore
+  assert.equal(codeConfidence('ABC-1234'), 'low');
+  assert.equal(codeConfidence('1234'), null);            // ≤4 cifre: troppo ambiguo (anni, modelli)
+  assert.equal(codeConfidence('3.940,00'), null);        // prezzo
+  assert.equal(codeConfidence('30000N'), null);          // numero+unità
+  assert.equal(codeConfidence('2450N'), null);           // sigla modello (Super Vigor 2450N)
+  assert.equal(codeConfidence('F535S'), null);           // sigla modello
+  assert.equal(codeConfidence('230V-50/60HZ'), null);    // dato elettrico
+  assert.equal(codeConfidence('16X12X8'), null);         // dimensioni
+});
+
+test('isProductCode v5.1: accetta alfanumerici e 10+ cifre', () => {
+  assert.equal(isProductCode('FG192/PS2'), true);
+  assert.equal(isProductCode('ABC-1234'), true);
+  assert.equal(isProductCode('1234567890'), true);
+  assert.equal(isProductCode('25100310*'), true);
+});
+
+test('joinMultiLineRows: codice alfanumerico a inizio riga → riga emessa con CHECK_CODICE', () => {
+  const out = _jml([{ tokens: ['FG192/PS2', 'Filtro', 'gasolio', '65,00'] }], 3);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].codice, 'FG192/PS2');
+  assert.equal(out[0].prezzo, 65);
+  assert.match(out[0].review_flag, /CHECK_CODICE/);
+});
+
+test('joinMultiLineRows: sigla alfanumerica in mezzo alla descrizione NON crea righe', () => {
+  // riga di continuazione che contiene "MEC-810X" non deve diventare un prodotto
+  const out = _jml([
+    { tokens: ['21100420', 'Disponibile', 'per', 'TOUCH', 'MEC-810X', 'fino', 'ad'] },
+    { tokens: ['esaurimento', '880,00'] }
+  ], 6);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].codice, '21100420');
+  assert.equal(out[0].prezzo, 880);
+});
+
+test('extractAnchors: candidato low allineato alla colonna codici diventa anchor flaggato', () => {
+  const items = [
+    { str: '21100070', top: 100, x0: 100 },
+    { str: '21100015', top: 200, x0: 100 },
+    { str: 'FG192/PS2', top: 300, x0: 101 },  // stessa colonna → anchor low
+    { str: 'AB-99X1', top: 150, x0: 260 }     // in mezzo alla descrizione → scartato
+  ];
+  const out = extractAnchors(items);
+  assert.equal(out.length, 3);
+  const low = out.find(a => a.codice === 'FG192/PS2');
+  assert.ok(low);
+  assert.equal(low.confidence, 'low');
+  assert.equal(out.some(a => a.codice === 'AB-99X1'), false);
+});
+
+test('emitRowFromBand: prezzo spezzato in banda ricomposto, frammento orfano flaggato', () => {
+  const cols = {
+    code: [95, 160], descrizione: [160, 470], prezzo: [470, 520],
+    compatibilita: [520, 600], noteLaterali: [0, 95]
+  };
+  const codeItem = { str: '21100304', x0: 100, x1: 144, top: 215 };
+  const anchor = { codice: '21100304', top: 215, item: codeItem };
+  const okRow = emitRowFromBand(anchor, [
+    codeItem,
+    { str: 'Distanziale', x0: 165, x1: 230, top: 215 },
+    { str: '1.', x0: 471, x1: 479, top: 215 },
+    { str: '100,00', x0: 480, x1: 510, top: 215 }
+  ], cols, 17);
+  assert.equal(okRow.prezzo, 1100);
+  assert.equal(okRow.review_flag, '');
+
+  // "1." + "10,00" → "1.10,00" non è un prezzo valido: il frammento resta
+  // orfano nella colonna prezzo e la riga va segnalata, non indovinata.
+  const fragRow = emitRowFromBand(anchor, [
+    codeItem,
+    { str: 'Distanziale', x0: 165, x1: 230, top: 215 },
+    { str: '1.', x0: 471, x1: 479, top: 215 },
+    { str: '10,00', x0: 480, x1: 505, top: 215 }
+  ], cols, 17);
+  assert.equal(fragRow.prezzo, 10);
+  assert.match(fragRow.review_flag, /CHECK_PREZZO/);
 });
