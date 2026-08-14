@@ -12,7 +12,8 @@ import {
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
   stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation,
-  reclassifyContaminatedDidascalie
+  reclassifyContaminatedDidascalie, propagateFloatingDescriptions,
+  detectSectionColumns, isInAccStandardColumn
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1394,4 +1395,144 @@ test('reclassifyContaminatedDidascalie: match anche come SUFFISSO', () => {
 test('reclassifyContaminatedDidascalie: input difensivo', () => {
   assert.deepEqual(reclassifyContaminatedDidascalie([], []), { rows: [], dotazioni: [] });
   assert.deepEqual(reclassifyContaminatedDidascalie(null, null), { rows: [], dotazioni: [] });
+});
+
+// === Disaccoppiamento — descrizione condivisa "a cavallo", prezzo per riga ===
+
+test('propagateFloatingDescriptions: gruppo a 2 con prezzi distinti → desc propagata, prezzi intatti', () => {
+  // Come p.54 20100112/20100362: cella-descrizione unica, un prezzo per riga.
+  const rows = [
+    { codice: 'A1', descrizione: 'Kit radiocomando', prezzo: 3100, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 607, _descGalleggiante: true },
+    { codice: 'A2', descrizione: '',                 prezzo: 5800, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 635 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, 'Kit radiocomando');
+  assert.match(out[1].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.equal(out[0].prezzo, 3100);   // prezzi PROPRI intatti (guardia-prezzo)
+  assert.equal(out[1].prezzo, 5800);
+});
+
+test('propagateFloatingDescriptions: gruppo a 5 con prezzo per riga → tutti descritti, nessun prezzo toccato', () => {
+  const rows = [
+    { codice: 'B1', descrizione: '',               prezzo: 100, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 208 },
+    { codice: 'B2', descrizione: '',               prezzo: 200, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 231 },
+    { codice: 'B3', descrizione: 'Rullo Tubeless', prezzo: 300, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 253, _descGalleggiante: true },
+    { codice: 'B4', descrizione: '',               prezzo: 400, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 276 },
+    { codice: 'B5', descrizione: '',               prezzo: 500, pagina: '54', review_flag: '', sezione: 'S1', yAnchor: 299 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.ok(out.every(r => r.descrizione === 'Rullo Tubeless'));
+  assert.deepEqual(out.map(r => r.prezzo), [100, 200, 300, 400, 500]); // ogni prezzo al suo posto
+  assert.match(out[0].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.doesNotMatch(out[2].review_flag || '', /DESCRIZIONE_GRUPPO/); // capofila
+});
+
+test('propagateFloatingDescriptions: galleria (righe SENZA prezzo) → nessuna propagazione', () => {
+  // Codici-didascalia di una pagina-galleria: nessun prezzo proprio → la logica
+  // non scatta e non si fabbricano descrizioni da testo di layout.
+  const rows = [
+    { codice: 'C1', descrizione: 'OPTIONAL', prezzo: null, pagina: '63', review_flag: 'PREZZO_MANCANTE', sezione: 'S2', yAnchor: 496, _descGalleggiante: true },
+    { codice: 'C2', descrizione: '',         prezzo: null, pagina: '63', review_flag: 'PREZZO_MANCANTE', sezione: 'S2', yAnchor: 508 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, '');            // niente propagazione
+  assert.doesNotMatch(out[1].review_flag || '', /DESCRIZIONE_GRUPPO/);
+});
+
+test('propagateFloatingDescriptions: descrizione NON galleggiante non cola sui vicini', () => {
+  // Una riga con descrizione propria allineata (non _descGalleggiante) non è una
+  // cella condivisa: la riga vuota accanto resta vuota.
+  const rows = [
+    { codice: 'D1', descrizione: 'Prodotto proprio', prezzo: 100, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 200 },
+    { codice: 'D2', descrizione: '',                 prezzo: 200, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 220 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, '');
+});
+
+test('propagateFloatingDescriptions: singleton (nessuna riga vuota accanto) → nessuna propagazione', () => {
+  const rows = [
+    { codice: 'E0', descrizione: 'Sopra', prezzo: 50, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 180 },
+    { codice: 'E1', descrizione: 'Etichetta a cavallo', prezzo: 100, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 200, _descGalleggiante: true },
+    { codice: 'E2', descrizione: 'Sotto', prezzo: 200, pagina: '1', review_flag: '', sezione: 'S1', yAnchor: 220 }
+  ];
+  const out = propagateFloatingDescriptions(rows);
+  assert.equal(out[1].descrizione, 'Etichetta a cavallo'); // invariata
+  assert.doesNotMatch(out[0].review_flag || '', /DESCRIZIONE_GRUPPO/);
+  assert.doesNotMatch(out[2].review_flag || '', /DESCRIZIONE_GRUPPO/);
+});
+
+test('propagateFloatingDescriptions: input difensivo', () => {
+  assert.deepEqual(propagateFloatingDescriptions([]), []);
+  assert.deepEqual(propagateFloatingDescriptions(null), []);
+});
+
+// === Gallerie ACCESSORI STANDARD a colonne → Dotazioni (pagg. 52/63/64) ===
+
+test('stripLayoutNoise: scarta le pseudo-etichette PC / 4x / Diametro Cerchio', () => {
+  assert.equal(stripLayoutNoise('PC'), '');
+  assert.equal(stripLayoutNoise('4x'), '');
+  assert.equal(stripLayoutNoise('Diametro Cerchio 11” - 25”'), '');
+  assert.equal(stripLayoutNoise('Diametro Ruota 400'), '');
+  // una vera descrizione non viene toccata
+  assert.equal(stripLayoutNoise('Pistoletta di gonfiaggio'), 'Pistoletta di gonfiaggio');
+});
+
+test('detectSectionColumns: banner a due colonne → due marker con fascia x', () => {
+  const items = [
+    { str: 'ACCESSORI', x0: 24, x1: 110, top: 394 },
+    { str: 'STANDARD',  x0: 112, x1: 141, top: 394 },
+    { str: 'OPTIONAL',  x0: 426, x1: 477, top: 394 }
+  ];
+  const cols = detectSectionColumns(items);
+  assert.equal(cols.length, 2);
+  const std = cols.find(c => c.text === 'ACCESSORI STANDARD');
+  const opt = cols.find(c => c.text === 'OPTIONAL');
+  assert.ok(std && opt);
+  assert.ok(std.xMin < opt.xMin);        // STANDARD a sinistra
+});
+
+test('detectSectionColumns: riconosce la variante "ACCESSORI STANDARD PER COD. NNN"', () => {
+  const items = [
+    { str: 'ACCESSORI STANDARD PER COD. 03100103', x0: 27, x1: 224, top: 409 },
+    { str: 'OPTIONAL', x0: 475, x1: 526, top: 458 }
+  ];
+  const cols = detectSectionColumns(items);
+  assert.ok(cols.some(c => c.text === 'ACCESSORI STANDARD' && Math.round(c.xMin) === 27));
+  assert.ok(cols.some(c => c.text === 'OPTIONAL'));
+});
+
+test('isInAccStandardColumn: colonna sinistra → true, colonna OPTIONAL destra → false', () => {
+  const cols = [
+    { text: 'ACCESSORI STANDARD', top: 394, xMin: 24, xMax: 141 },
+    { text: 'OPTIONAL', top: 394, xMin: 426, xMax: 477 }
+  ];
+  assert.equal(isInAccStandardColumn(cols, 477, 255), true);   // codice a sinistra
+  assert.equal(isInAccStandardColumn(cols, 477, 480), false);  // codice sotto OPTIONAL
+  assert.equal(isInAccStandardColumn(cols, 300, 255), false);  // banner non ancora sopra
+  assert.equal(isInAccStandardColumn([], 477, 255), false);
+});
+
+test('classifyDidascalie: codice-galleria (hint _boxAccStandard) senza prezzo → Dotazioni, desc vuota', () => {
+  const rows = [
+    { codice: '90000040', descrizione: '',   prezzo: null, pagina: '52', review_flag: 'PREZZO_MANCANTE', sezione: 'S1', _boxAccStandard: true },
+    { codice: '90000041', descrizione: 'PC', prezzo: null, pagina: '63', review_flag: 'PREZZO_MANCANTE', sezione: 'S2', _boxAccStandard: true }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(mainRows.length, 0);
+  assert.deepEqual(dotazioni.map(d => d.codice).sort(), ['90000040', '90000041']);
+  assert.ok(dotazioni.every(d => d.descrizione === '' && d.review_flag === 'CODICE_DIDASCALIA'));
+});
+
+test('classifyDidascalie: il box-hint scarta la didascalia-galleria ma la riga prezzata sopravvive', () => {
+  // Un codice che compare come didascalia in galleria (p.52) E come riga prezzata
+  // altrove (p.54): l'occorrenza-galleria è scartata, quella prezzata resta.
+  const rows = [
+    { codice: '90000042', descrizione: '',      prezzo: null, pagina: '52', review_flag: 'PREZZO_MANCANTE', sezione: 'S1', _boxAccStandard: true },
+    { codice: '90000042', descrizione: 'Rullo', prezzo: 300,  pagina: '54', review_flag: '',                sezione: 'ACC' }
+  ];
+  const { mainRows, dotazioni } = classifyDidascalie(rows);
+  assert.equal(dotazioni.length, 0);       // ha una riga prezzata → resta nel Listino
+  assert.equal(mainRows.length, 1);
+  assert.equal(mainRows[0].pagina, '54');
 });

@@ -1,5 +1,65 @@
 # Changelog
 
+## v5.4.0 — Residui di estrazione e celle-descrizione condivise
+
+Raffinamenti sui casi-limite emersi dopo la v5.3.0, diagnosticati sul listino di
+riferimento con il nuovo tooling a coordinate. Nessuna nuova dipendenza.
+
+### Pattern A — didascalie, casi residui
+- **Box ACCESSORI STANDARD uniformato**: un frammento di layout con l'iniziale
+  maiuscola (la parola-marker `OPTIONAL`, una nota-dimensione `Ø mm N`) non
+  "salva" più un codice dal box — `stripLayoutNoise()` toglie marker di sezione,
+  note-quantità `(n pcs)` e note-dimensione prima del controllo, così l'INTERO
+  box va in Dotazioni standard invece di lasciare fuori qualche codice con un
+  frammento.
+- **Filtro sezioni-appendice**: la pagina riassuntiva pesi/misure imballi
+  (`DIMENSIONI IMBALLI`) non è un listino — l'unica riga che il parser vi
+  agganciava (l'intera tabella come descrizione) viene filtrata come un banner.
+- **Didascalie con descrizione contaminata**: un codice-didascalia senza prezzo
+  né nome proprio che aveva catturato la descrizione di un'altra riga (coincide o
+  è prefisso/suffisso della descrizione del proprietario) va in Dotazioni con
+  descrizione vuota, invece di restare nel Listino con testo altrui.
+- **Gallerie ACCESSORI STANDARD a colonne** (pagg. 52/63/64): il box a due
+  colonne `ACCESSORI STANDARD | OPTIONAL` (e la variante `ACCESSORI STANDARD PER
+  COD. NNN`) non era riconosciuto; ora quei codici-didascalia vanno in Dotazioni
+  con descrizione vuota, scartando le pseudo-etichette di icona/specifica
+  (`PC`, `4x`, `Diametro Cerchio …`). Vedi nota sullo scope più sotto.
+
+### Pattern B — celle condivise, casi residui
+- **Coppie celle-condivise mancate**: continuazioni tutte MAIUSCOLE
+  (`isShortUpperContinuation`), righe vuote a prezzo nullo sotto una capofila a
+  prezzo unico, e descrizioni di gruppo ripulite dalle note-quantità.
+- **Disaccoppiamento descrizione/prezzo nelle celle "a cavallo"**: quando
+  un'unica cella-descrizione è condivisa da più codici che hanno CIASCUNO il
+  proprio prezzo (tabelle a colonne), ora si propaga solo la **descrizione**
+  (`DESCRIZIONE_GRUPPO`) e mai il prezzo — la descrizione condivisa è
+  riconosciuta a livello di banda (etichetta non allineata alla riga del codice).
+  La guardia sui prezzi distinti resta intatta.
+
+### Tooling
+- `scripts/valida-listino.mjs --dump-page N`: stampa i text item grezzi di una
+  pagina (x, y, width, str) ordinati per y poi x, con i **prezzi mascherati**
+  (`#.###,##`), per ispezionare la geometria delle tabelle.
+
+### Contatori aggregati sul listino di riferimento (v5.3.0 → v5.4.0)
+
+| Metrica                              | v5.3.0 | v5.4.0 |
+|--------------------------------------|:------:|:------:|
+| Righe di listino                     |  319   |  306   |
+| Prezzi valorizzati                   |  301   |  303   |
+| Prezzi mancanti (denominatore)       |   18   |    3   |
+| Dotazioni standard (codici-didascalia) |  20   |   32   |
+
+I prezzi valorizzati non calano (nessun prezzo viene mai propagato o inventato);
+i prezzi mancanti scendono perché i codici-didascalia escono dal denominatore.
+
+### Nota sullo scope (gate a pagine fisse 52/63/64)
+Il riconoscimento delle gallerie ACCESSORI STANDARD a colonne è limitato alle
+pagine 52/63/64 (`ACC_STD_GALLERY_PAGES`). È una **decisione diagnostica
+deliberata**: lo stesso box a due colonne è presente anche sulle schede prodotto,
+dove però quei codici sono membri di matrice/righe reali; una regola geometrica
+generale li travolgerebbe. **Da rivedere se cambia l'impaginazione del listino.**
+
 ## v5.3.0 — Pattern strutturali del PDF (didascalie, celle-matrice, banner)
 
 Tre pattern strutturali del listino, diagnosticati sul listino di riferimento (96 pag.), corretti

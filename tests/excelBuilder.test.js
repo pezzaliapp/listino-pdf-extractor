@@ -72,8 +72,8 @@ test('buildWorkbook: 00_Info include Versione_Parser, Versione app e il conteggi
     const keyCell = info[XLSX.utils.encode_cell({ r: i, c: 0 })];
     const valCell = info[XLSX.utils.encode_cell({ r: i, c: 1 })];
     if (!keyCell) continue;
-    if (keyCell.v === 'Versione_Parser') { assert.equal(valCell.v, '5.3.0'); foundParser = true; }
-    if (keyCell.v === 'Versione app')    { assert.equal(valCell.v, '5.3.0'); foundApp = true; }
+    if (keyCell.v === 'Versione_Parser') { assert.equal(valCell.v, '5.4.0'); foundParser = true; }
+    if (keyCell.v === 'Versione app')    { assert.equal(valCell.v, '5.4.0'); foundApp = true; }
     if (keyCell.v === 'Codici-didascalia') { assert.equal(valCell.v, 1); foundDidascalie = true; }
   }
   assert.equal(foundParser, true, 'Versione_Parser deve essere presente in 00_Info');
