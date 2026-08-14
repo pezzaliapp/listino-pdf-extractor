@@ -98,13 +98,14 @@ async function handleFile(file) {
     state.meta = meta;
 
     if (rows.length === 0) {
-      appendLog('Nessuna riga prodotto riconosciuta. Verifica che il PDF contenga testo selezionabile.');
+      appendLog('✗ Estrazione terminata: nessuna riga prodotto riconosciuta. Verifica che il PDF contenga testo selezionabile.');
       $('#btn-download').disabled = true;
       return;
     }
 
     renderPreview(rows);
     $('#btn-download').disabled = false;
+    appendLog('✓ Estrazione completata — puoi scaricare l\'Excel.');
   } catch (err) {
     console.error(err);
     appendLog(`Errore durante l'elaborazione: ${err.message || err}`);

@@ -313,9 +313,16 @@ export function computeColumnBands(items, pageWidth = Infinity) {
   const xPriceLeft  = _modeOfRounded(prices.map(it => it.x0));
   const xPriceRight = _modeOfRounded(prices.map(it => it.x1));
   const xCodeLeft   = _modeOfRounded(codes.map(it => it.x0));
+  // Bordo destro della colonna codici: x1 modale dei soli codici allineati
+  // alla colonna (x0 ≈ modale). Con il vecchio x0+60 fisso, il testo che
+  // inizia subito dopo il codice — tipicamente il NOME DEL MODELLO — cadeva
+  // dentro la banda code e veniva scartato dalla descrizione.
+  const aligned = codes.filter(it => Math.abs(Math.round(it.x0) - xCodeLeft) <= 2);
+  const xCodeRightRaw = _modeOfRounded((aligned.length ? aligned : codes).map(it => it.x1));
+  const xCodeRight = Math.min(Math.max(xCodeRightRaw + 4, xCodeLeft + 20), xCodeLeft + 60);
   return {
-    code:          [xCodeLeft - 5, xCodeLeft + 60],
-    descrizione:   [xCodeLeft + 60, xPriceLeft - 10],
+    code:          [xCodeLeft - 5, xCodeRight],
+    descrizione:   [xCodeRight, xPriceLeft - 10],
     prezzo:        [xPriceLeft - 10, xPriceRight + 10],
     compatibilita: [xPriceRight + 10, pageWidth],
     noteLaterali:  [0, xCodeLeft - 5],
@@ -491,15 +498,28 @@ export function stripIconText(items) {
   if (!Array.isArray(items)) return [];
   const removeSet = new Set();
 
-  // Fase 1: icone isolate corte
-  for (const it of items) {
-    if (!it) continue;
+  // Fase 1: icone isolate corte. "Isolata" = nessun altro item di testo
+  // sulla stessa riga visiva (|Δtop| ≤ 4) adiacente in orizzontale
+  // (gap < 12pt): le parole vere ("con NLS, Sollevatore") hanno sempre
+  // vicini di riga, le icone-badge vivono da sole.
+  const textItems = items.filter(x => x && String(x.str || '').trim());
+  for (const it of textItems) {
     const t = String(it.str || '').trim();
-    if (!t) continue;
     if (t.length > 3) continue;
     if (!ICON_STRINGS.has(t)) continue;
     const w = Number(it.x1) - Number(it.x0);
-    if (Number.isFinite(w) && w < 20) removeSet.add(it);
+    if (!(Number.isFinite(w) && w < 20)) continue;
+    // I char singoli (B, P, L…) sono badge anche se adiacenti al testo:
+    // per loro vale la regola storica. L'eccezione-vicinato si applica ai
+    // token di 2+ lettere (NLS, RLC…), che possono essere parole vere.
+    if (t.length === 1) { removeSet.add(it); continue; }
+    const hasNeighbor = textItems.some(o => {
+      if (o === it) return false;
+      if (Math.abs(Number(o.top) - Number(it.top)) > 4) return false;
+      const gap = Math.max(Number(it.x0) - Number(o.x1), Number(o.x0) - Number(it.x1));
+      return gap < 12;
+    });
+    if (!hasNeighbor) removeSet.add(it);
   }
 
   // Fase 2: run di char singoli che spellano un'icona
@@ -661,7 +681,20 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
   // farebbe scegliere 100 perdendo le migliaia. Il coalescing non tocca mai
   // l'item-anchor (un codice non è mai un frammento di prezzo).
   const items = coalesceSplitPriceItems(Array.isArray(bandItems) ? bandItems : []);
-  const sorted = [...items].sort((a, b) => (a.top - b.top) || (a.x0 - b.x0));
+  // Ordina per RIGA VISIVA e poi per x: pdf.js assegna alla stessa riga top
+  // che differiscono di ~1pt e l'ordinamento puro (top, x0) rimescola le
+  // parole ("1ph 230V" prima di "con NLS"). Le righe si individuano
+  // clusterizzando i top: un salto > 4pt apre una nuova riga.
+  const tops = [...new Set(items.map(it => Number(it.top)).filter(Number.isFinite))].sort((a, b) => a - b);
+  const lineOf = new Map();
+  let line = 0;
+  for (let i = 0; i < tops.length; i++) {
+    if (i > 0 && tops[i] - tops[i - 1] > 4) line++;
+    lineOf.set(tops[i], line);
+  }
+  const sorted = [...items].sort((a, b) =>
+    ((lineOf.get(Number(a.top)) ?? 0) - (lineOf.get(Number(b.top)) ?? 0)) ||
+    (a.x0 - b.x0) || (a.top - b.top));
   const descItems = [];
   let prezzo = null;
   let prezzoTop = null;
@@ -698,6 +731,11 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
           priceFragmentLeftover = true;
         }
       } else if (cls === 'descrizione') {
+        // Testo a corpo molto più piccolo di quello della riga (tabelle
+        // dati tecnici, note a piè di tabella) non è descrizione prodotto.
+        const afs = Number(anchor.item && anchor.item.fontSize);
+        const ifs = Number(it.fontSize);
+        if (Number.isFinite(afs) && Number.isFinite(ifs) && ifs < afs - 1.2) continue;
         descItems.push(it);
       }
       // 'code' | 'compatibilita' | 'noteLaterali' | null → skip
@@ -722,6 +760,7 @@ export function emitRowFromBand(anchor, bandItems, columnBands, pageNum) {
     .filter(Boolean)
     .join(' ')
     .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:])/g, '$1')
     .trim();
 
   const flags = [];
@@ -907,21 +946,24 @@ export function mergeMultiCodeRows(rows) {
     if (!prev || !next) continue;
     const dy = Math.abs(Number(next.yAnchor) - Number(prev.yAnchor));
     if (!Number.isFinite(dy) || dy >= 70) continue;
-    if (prev.descrizione && String(prev.descrizione).length > 0) continue;
     if (prev.prezzo !== null && prev.prezzo !== undefined) continue;
     if (next.prezzo === null || next.prezzo === undefined) continue;
     // Solo vere celle condivise. Due firme accettate:
-    //  a) next senza descrizione (tutto il contenuto è finito altrove);
-    //  b) next con contenuto, ma con prezzo "galleggiante" sopra la propria
-    //     riga (rowspan centrato tra i due codici, es. 25100044/25100045).
+    //  a) prev e next entrambe senza descrizione (il contenuto del rowspan
+    //     è finito tutto altrove);
+    //  b) prezzo di next "galleggiante" sopra la propria riga (rowspan
+    //     centrato tra i due codici): il prezzo è geometricamente conteso,
+    //     quindi appartiene a entrambe — anche se prev ha già la sua
+    //     descrizione (es. p.36: descrizione sopra il midpoint, prezzo sotto).
     // Se next è una riga-prodotto completa col prezzo sulla propria riga,
     // prev è più probabilmente un codice-etichetta (es. box OPTIONAL) che
     // le sta sopra per caso: rubare il prezzo sarebbe indovinare.
+    const prevHasDesc = prev.descrizione && String(prev.descrizione).length > 0;
     const nextHasDesc = next.descrizione && String(next.descrizione).length > 0;
-    if (nextHasDesc && !next._prezzoGalleggiante) continue;
+    if (!next._prezzoGalleggiante && (prevHasDesc || nextHasDesc)) continue;
     if ((prev.sezione ?? '') !== (next.sezione ?? '')) continue;
     prev.prezzo = next.prezzo;
-    if (nextHasDesc) prev.descrizione = next.descrizione;
+    if (!prevHasDesc && nextHasDesc) prev.descrizione = next.descrizione;
     prev.review_flag = 'MERGED_FROM_NEXT';
   }
   return out;
@@ -987,6 +1029,10 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     const sectionMarkers = findSectionMarkers(items);
 
     const bands = buildBandsFromAnchors(anchors, 0, pageHeight);
+    for (const b of bands) {
+      b.yTop = Math.max(b.yTop, b.anchor.top - 35);
+      b.yBottom = Math.min(b.yBottom, b.anchor.top + 120);
+    }
     const pageRows = [];
     for (const band of bands) {
       const bandItems = collectBandItems(items, band);

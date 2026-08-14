@@ -55,8 +55,11 @@ test('computeColumnBands: deriva le 5 fasce dalla moda di codici e prezzi', () =
     { str: '65,00', x0: 480, x1: 510 }
   ];
   const bands = computeColumnBands(items, 600);
-  assert.deepEqual(bands.code,          [95, 160]);   // 100-5, 100+60
-  assert.deepEqual(bands.descrizione,   [160, 470]);  // 100+60, 480-10
+  // v5.2: il bordo destro della banda code è la x1 modale dei codici + 4
+  // (130+4=134), non più x0+60: così il nome modello subito dopo il codice
+  // finisce in descrizione invece di essere scartato.
+  assert.deepEqual(bands.code,          [95, 134]);   // 100-5, 130+4
+  assert.deepEqual(bands.descrizione,   [134, 470]);  // 130+4, 480-10
   assert.deepEqual(bands.prezzo,        [470, 520]);  // 480-10, 510+10
   assert.deepEqual(bands.compatibilita, [520, 600]);  // 510+10, pageWidth
   assert.deepEqual(bands.noteLaterali,  [0, 95]);     // 0, 100-5
