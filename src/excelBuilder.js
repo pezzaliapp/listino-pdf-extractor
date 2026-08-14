@@ -66,8 +66,8 @@ export function buildWorkbook({ rows, dotazioni, meta, sourcePdfName }) {
     ['Codici-didascalia',      m.dotazioni_count ?? safeDotazioni.length],
     ['Righe in CHECK',         m.rows_in_check ?? 0],
     ['Generato il',            new Date().toISOString()],
-    ['Versione app',           '5.3.0'],
-    ['Versione_Parser',        '5.3.0'],
+    ['Versione app',           '5.4.0'],
+    ['Versione_Parser',        '5.4.0'],
     ['Avvertenza',             'Strumento AS-IS. Verificare sempre i dati estratti rispetto al PDF originale.']
   ];
   const wsInfo = XLSX.utils.aoa_to_sheet(infoData);
