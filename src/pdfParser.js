@@ -1175,6 +1175,15 @@ export function isFragmentDesc(d) {
   return ch === ch.toLowerCase() && ch !== ch.toUpperCase();
 }
 
+/** Una singola parola tutta MAIUSCOLA e breve ("STANDARD", "CE", "BAT") è una
+ *  sigla-suffisso di variante che continua la cella del codice sopra, non un
+ *  nome-prodotto a sé: isFragmentDesc non la cattura (inizia in maiuscola), ma
+ *  in una cella condivisa va agganciata al gruppo. Il limite a una parola breve
+ *  evita di risucchiare una vera capofila multi-parola. */
+export function isShortUpperContinuation(d) {
+  return /^[A-ZÀ-Ý]{2,12}$/.test(String(d == null ? '' : d).trim());
+}
+
 function _flagList(row) {
   return new Set(String(row.review_flag || '').split(';').map(s => s.trim()).filter(Boolean));
 }
@@ -1228,11 +1237,16 @@ export function mergeMatrixGroups(rows) {
       let joins = false;
       if (isFragmentDesc(cur.descrizione)) {
         joins = true;
-      } else if (_isEmptyDesc(cur.descrizione)) {
-        // vuota: entra solo se condivide un prezzo già presente nel gruppo
-        // (stessa cella, stesso importo). Le vuote a prezzo nullo restano a
-        // mergeMultiCodeRows, che ha guardie più strette (evita p.54/p.43).
-        joins = cur.prezzo != null && groupPrices.length === 1 && cur.prezzo === groupPrices[0];
+      } else if (_isEmptyDesc(cur.descrizione) || isShortUpperContinuation(cur.descrizione)) {
+        // Codice quasi-nudo — riga vuota, oppure una sigla-suffisso maiuscola
+        // ("STANDARD") che continua la cella del codice sopra. Entra se il gruppo
+        // ha UN SOLO prezzo e cur non porta un prezzo PROPRIO diverso: una riga
+        // con un prezzo proprio e distinto è un prodotto a sé e NON si fonde
+        // (guardia p.54, invariata). Un prezzo nullo o uguale a quello del
+        // gruppo indica invece la stessa cella condivisa (p.37 20100404, p.43
+        // 20100184).
+        joins = groupPrices.length === 1 &&
+                (cur.prezzo == null || cur.prezzo === groupPrices[0]);
       }
       if (!joins) break;
       group.push(cur);
@@ -1245,11 +1259,14 @@ export function mergeMatrixGroups(rows) {
 }
 
 function _applyMatrixGroup(group) {
-  const fullDesc = group
+  // La descrizione ricomposta viene ripulita dalle note di layout (quantità
+  // "(15 pcs)", dimensioni "Ø mm N") che colano dentro la cella condivisa e
+  // contaminerebbero il gruppo (es. p.31 20200590).
+  const fullDesc = stripLayoutNoise(group
     .map(g => String(g.descrizione || '').trim())
     .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
+    .join(' '))
+    .replace(/\s+([,.;:])/g, '$1')
     .trim();
   const prices = _distinctNonNull(group.map(g => g.prezzo));
   const singlePrice = prices.length === 1 ? prices[0] : null;

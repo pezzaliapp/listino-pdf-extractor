@@ -11,7 +11,7 @@ import {
   detectPageTitle, findSectionMarkers, assignSectionToRow,
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
-  stripOptionalBanner, stripLayoutNoise, isExcludedSection
+  stripOptionalBanner, stripLayoutNoise, isExcludedSection, isShortUpperContinuation
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1267,4 +1267,72 @@ test('isExcludedSection: una riga con l\'intera tabella imballi in descrizione �
     sezione: 'DIMENSIONI IMBALLI'
   };
   assert.equal(isExcludedSection(row.sezione), true);
+});
+
+// === Intervento 3 — coppie celle-condivise mancate (continuazioni/vuote/note) ===
+
+test('isShortUpperContinuation: solo una parola MAIUSCOLA breve', () => {
+  assert.equal(isShortUpperContinuation('STANDARD'), true);
+  assert.equal(isShortUpperContinuation('CE'), true);
+  assert.equal(isShortUpperContinuation('Kit'), false);          // non tutta maiuscola
+  assert.equal(isShortUpperContinuation('KIT SMART APP'), false); // multi-parola
+  assert.equal(isShortUpperContinuation('ruote'), false);
+  assert.equal(isShortUpperContinuation(''), false);
+});
+
+test('mergeMatrixGroups: sigla-suffisso MAIUSCOLA ("STANDARD") continua la cella del codice sopra', () => {
+  // Come p.37: 20100319 "Pistoletta di gonfiaggio" @80, sotto un codice con la
+  // sola sigla "STANDARD" a prezzo nullo → stessa cella, stesso prezzo.
+  const rows = [
+    { codice: 'K1', descrizione: 'Pistoletta di gonfiaggio', prezzo: 80,   pagina: '37', review_flag: '',                sezione: 'MATR', yAnchor: 540 },
+    { codice: 'K2', descrizione: 'STANDARD',                  prezzo: null, pagina: '37', review_flag: 'PREZZO_MANCANTE', sezione: 'MATR', yAnchor: 571 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[1].descrizione, 'Pistoletta di gonfiaggio STANDARD');
+  assert.equal(out[1].prezzo, 80);
+  assert.match(out[1].review_flag, /PREZZO_GRUPPO/);
+  assert.doesNotMatch(out[1].review_flag, /PREZZO_MANCANTE/);
+  assert.equal(out[0].descrizione, 'Pistoletta di gonfiaggio STANDARD'); // capofila completata
+});
+
+test('mergeMatrixGroups: riga vuota a prezzo NULLO sotto una capofila con prezzo unico → cella condivisa', () => {
+  // Come p.43: 20100216 "Set di 3 protezioni..." @90, sotto un codice vuoto e
+  // senza prezzo (20100184) che appartiene alla stessa cella.
+  const rows = [
+    { codice: 'L1', descrizione: 'Set di 3 protezioni paletta stallonatore', prezzo: 90,   pagina: '43', review_flag: '',                sezione: 'MATR', yAnchor: 170 },
+    { codice: 'L2', descrizione: '',                                          prezzo: null, pagina: '43', review_flag: 'PREZZO_MANCANTE', sezione: 'MATR', yAnchor: 210 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[1].descrizione, 'Set di 3 protezioni paletta stallonatore');
+  assert.equal(out[1].prezzo, 90);
+  assert.match(out[1].review_flag, /DESCRIZIONE_GRUPPO/);
+  assert.match(out[1].review_flag, /PREZZO_GRUPPO/);
+});
+
+test('mergeMatrixGroups: guardia p.54 invariata — prezzo proprio distinto NON si fonde', () => {
+  // Anche con le nuove condizioni, una riga vuota/breve con un prezzo PROPRIO
+  // diverso da quello del gruppo resta un prodotto a sé (nessun merge).
+  const rows = [
+    { codice: 'M1', descrizione: '', prezzo: 800,  pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 208 },
+    { codice: 'M2', descrizione: '', prezzo: 1300, pagina: '54', review_flag: '', sezione: 'ACC', yAnchor: 231 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.equal(out[0].prezzo, 800);
+  assert.equal(out[1].prezzo, 1300);
+  assert.equal(out[1].descrizione, '');
+  assert.doesNotMatch(out[1].review_flag || '', /GRUPPO/);
+});
+
+test('mergeMatrixGroups: la descrizione di gruppo è ripulita dalle note quantità', () => {
+  // Come p.31 (20200590): un frammento porta "(15 pcs)" dentro la cella;
+  // la descrizione ricomposta non deve contenerlo.
+  const rows = [
+    { codice: 'N1', descrizione: 'Gruppo esterno di gonfiaggio',       prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 547 },
+    { codice: 'N2', descrizione: '(15 pcs) e manometro pressione.',    prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 551 },
+    { codice: 'N3', descrizione: 'tubeless + pedale gonfiaggio',       prezzo: null, pagina: '31', review_flag: 'PREZZO_MANCANTE', sezione: 'S', yAnchor: 555 }
+  ];
+  const out = mergeMatrixGroups(rows);
+  assert.doesNotMatch(out[0].descrizione, /\(15 pcs\)/);
+  assert.match(out[0].descrizione, /Gruppo esterno di gonfiaggio/);
+  assert.match(out[0].descrizione, /manometro pressione/);
 });
