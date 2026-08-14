@@ -11,7 +11,7 @@ import {
   detectPageTitle, findSectionMarkers, assignSectionToRow,
   isDegenerateDesc, classifyDidascalie,
   isSubstantialDesc, isFragmentDesc, mergeMatrixGroups, flagPartialDescriptions,
-  stripOptionalBanner, stripLayoutNoise
+  stripOptionalBanner, stripLayoutNoise, isExcludedSection
 } from '../src/pdfParser.js';
 
 test('parsePriceString', () => {
@@ -1241,4 +1241,30 @@ test('classifyDidascalie: una vera descrizione-prodotto continua a salvare il co
   assert.equal(dotazioni.length, 0);
   assert.equal(mainRows.length, 1);
   assert.equal(mainRows[0].pagina, '29');
+});
+
+// === Intervento 2 — filtro sezione-appendice (DIMENSIONI IMBALLI) ===
+
+test('isExcludedSection: riconosce la sezione tabella imballi, non le sezioni normali', () => {
+  assert.equal(isExcludedSection('DIMENSIONI IMBALLI'), true);
+  assert.equal(isExcludedSection('S1 > DIMENSIONI IMBALLI'), true);
+  assert.equal(isExcludedSection('dimensioni  imballi'), true);   // case/spazi
+  assert.equal(isExcludedSection('S1 > ACCESSORI STANDARD'), false);
+  assert.equal(isExcludedSection('ACCESSORI SMONTAGOMME'), false);
+  assert.equal(isExcludedSection(''), false);
+  assert.equal(isExcludedSection(null), false);
+});
+
+test('isExcludedSection: una riga con l\'intera tabella imballi in descrizione è filtrabile', () => {
+  // Fixture sintetica (dati fittizi): l'unica "riga" della pagina appendice
+  // raccoglie tutta la tabella pesi/misure; la sezione basta a filtrarla.
+  const row = {
+    codice: '90000020',
+    descrizione: 'LxPxH (cm) Cassa in legno 50 65 110x60x50 A vista su pallet 80 90 96x69x160',
+    prezzo: null,
+    pagina: '90',
+    review_flag: 'PREZZO_MANCANTE',
+    sezione: 'DIMENSIONI IMBALLI'
+  };
+  assert.equal(isExcludedSection(row.sezione), true);
 });

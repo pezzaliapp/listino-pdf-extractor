@@ -841,6 +841,20 @@ export function stripOptionalBanner(desc) {
 }
 
 /**
+ * Sezioni-appendice che NON sono listino: tabelle riassuntive (pesi e misure
+ * degli imballi) senza codice/prezzo per riga. L'unica "riga" che il parser vi
+ * aggancia raccoglie l'intera tabella come descrizione (es. la sezione
+ * "DIMENSIONI IMBALLI"): va filtrata come un banner, non emessa nel Listino.
+ */
+export const EXCLUDED_SECTION_RE = /DIMENSIONI\s+IMBALL/i;
+
+/** True se la sezione della riga appartiene a un'appendice tabellare da NON
+ *  emettere come riga di listino. */
+export function isExcludedSection(sezione) {
+  return EXCLUDED_SECTION_RE.test(String(sezione == null ? '' : sezione));
+}
+
+/**
  * M1 — Costruisce una riga prodotto dalla banda di un anchor.
  *  - descrizione: concatenazione (top↑, x0↑) degli item in fascia 'descrizione'
  *  - prezzo: primo prezzo valido in fascia 'prezzo' (parsePriceString)
@@ -1361,12 +1375,16 @@ export async function extractFromPdfDocument(pdf, onLog = () => {}) {
     }
   }
 
+  // Filtro sezioni-appendice (es. "DIMENSIONI IMBALLI"): non sono listino, la
+  // riga agganciata è solo l'intera tabella pesi/misure incollata in descrizione.
+  const listinoRows = allRows.filter(r => !isExcludedSection(r.sezione));
+
   // Pattern A — separa le occorrenze-didascalia (box ACCESSORI STANDARD) dalle
   // vere righe di listino PRIMA di Pattern B e dell'aggregazione: così un codice
   // come 21100240 (didascalia su molte pagine, prezzato solo a pag.18) aggrega
   // la sola occorrenza reale, e i badge (es. 41100028 "( )") non finiscono per
   // sbaglio dentro un gruppo-matrice che ne "gonfierebbe" la descrizione.
-  const { mainRows, dotazioni } = classifyDidascalie(allRows);
+  const { mainRows, dotazioni } = classifyDidascalie(listinoRows);
 
   // Pattern B — celle descrizione/prezzo condivise da un gruppo di codici,
   // applicato per pagina sui superstiti (le righe di ogni pagina sono già in
